@@ -1,7 +1,8 @@
 //! The browser extension, bundled in the executable. RDM writes it to a stable folder the browsers
 //! load it from — Chrome, Brave, Opera, Edge, Chromium: "load unpacked"; Firefox: the signed
-//! package of the GitHub release when there is one, a temporary add-on otherwise — rewrites that
-//! copy when a newer RDM brings a newer extension, and opens each browser on its extensions page.
+//! package of the GitHub release when there is one, a temporary add-on otherwise; Waterfox (a
+//! Firefox derivative that can accept unsigned packages): the package itself — rewrites that copy
+//! when a newer RDM brings a newer extension, and opens each browser where the user confirms.
 
 use std::{
     borrow::Cow,
@@ -14,6 +15,7 @@ include!(concat!(env!("OUT_DIR"), "/extension_files.rs"));
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Browser {
     Firefox,
+    Waterfox,
     Chrome,
     Brave,
     Opera,
@@ -21,7 +23,7 @@ pub enum Browser {
     Chromium,
 }
 
-/// Chromium-based browsers share one build; Firefox has its own manifest.
+/// Chromium-based browsers share one build; Firefox and its derivatives have their own manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flavour {
     Chromium,
@@ -29,11 +31,12 @@ pub enum Flavour {
 }
 
 impl Browser {
-    pub const ALL: [Self; 6] = [Self::Firefox, Self::Chrome, Self::Brave, Self::Opera, Self::Edge, Self::Chromium];
+    pub const ALL: [Self; 7] = [Self::Firefox, Self::Waterfox, Self::Chrome, Self::Brave, Self::Opera, Self::Edge, Self::Chromium];
 
     pub const fn name(self) -> &'static str {
         match self {
             Self::Firefox => "Firefox",
+            Self::Waterfox => "Waterfox",
             Self::Chrome => "Google Chrome",
             Self::Brave => "Brave",
             Self::Opera => "Opera",
@@ -46,6 +49,7 @@ impl Browser {
     pub const fn key(self) -> &'static str {
         match self {
             Self::Firefox => "firefox",
+            Self::Waterfox => "waterfox",
             Self::Chrome => "chrome",
             Self::Brave => "brave",
             Self::Opera => "opera",
@@ -60,7 +64,7 @@ impl Browser {
 
     pub const fn flavour(self) -> Flavour {
         match self {
-            Self::Firefox => Flavour::Firefox,
+            Self::Firefox | Self::Waterfox => Flavour::Firefox,
             _ => Flavour::Chromium,
         }
     }
@@ -68,7 +72,7 @@ impl Browser {
     /// Where extensions are managed (opened for the user, who confirms the installation there).
     pub const fn extensions_page(self) -> &'static str {
         match self {
-            Self::Firefox => "about:debugging#/runtime/this-firefox",
+            Self::Firefox | Self::Waterfox => "about:debugging#/runtime/this-firefox",
             Self::Brave => "brave://extensions/",
             Self::Opera => "opera://extensions/",
             Self::Edge => "edge://extensions/",
@@ -278,6 +282,10 @@ mod imp {
     pub fn find(browser: Browser) -> Option<PathBuf> {
         let (exe, known): (&str, &[&str]) = match browser {
             Browser::Firefox => ("firefox.exe", &[r"Mozilla Firefox\firefox.exe"]),
+            Browser::Waterfox => (
+                "waterfox.exe",
+                &[r"Waterfox\waterfox.exe", r"Waterfox Current\waterfox.exe", r"Waterfox Classic\waterfox.exe", r"Programs\Waterfox\waterfox.exe"],
+            ),
             Browser::Chrome => ("chrome.exe", &[r"Google\Chrome\Application\chrome.exe"]),
             Browser::Brave => ("brave.exe", &[r"BraveSoftware\Brave-Browser\Application\brave.exe"]),
             Browser::Opera => ("opera.exe", &[r"Programs\Opera\opera.exe", r"Programs\Opera\launcher.exe", r"Opera\launcher.exe"]),
@@ -308,6 +316,7 @@ mod imp {
     pub fn find(browser: Browser) -> Option<PathBuf> {
         let names: &[&str] = match browser {
             Browser::Firefox => &["firefox", "firefox-esr", "org.mozilla.firefox"],
+            Browser::Waterfox => &["waterfox", "waterfox-g", "waterfox-current", "net.waterfox.waterfox"],
             Browser::Chrome => &["google-chrome", "google-chrome-stable", "com.google.Chrome"],
             Browser::Brave => &["brave-browser", "brave", "com.brave.Browser"],
             Browser::Opera => &["opera", "com.opera.Opera"],
@@ -319,7 +328,8 @@ mod imp {
             .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
             .unwrap_or_default()
             .into_iter()
-            .chain(["/snap/bin", "/var/lib/flatpak/exports/bin"].map(PathBuf::from))
+            // Waterfox's own tarball unpacks to /opt/waterfox.
+            .chain(["/snap/bin", "/var/lib/flatpak/exports/bin", "/opt/waterfox"].map(PathBuf::from))
             .chain(home.map(|h| h.join(".local/share/flatpak/exports/bin")))
             .collect();
         names.iter().flat_map(|n| dirs.iter().map(move |d| d.join(n))).find(|p| p.is_file())

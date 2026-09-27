@@ -22,8 +22,13 @@ let queue = Promise.resolve();
 const serially = (task) => (queue = queue.then(task).catch(() => {}));
 
 /** Which browser this is, for RDM's extension window (`x-rdm-browser`). */
-const BROWSER = (() => {
-  if (typeof globalThis.browser?.runtime?.getBrowserInfo === "function") return "firefox";
+const BROWSER = (async () => {
+  const info = globalThis.browser?.runtime?.getBrowserInfo;
+  if (typeof info === "function") {
+    // Firefox and its derivatives (Waterfox reports its own name here, not in its User-Agent).
+    const { name = "" } = await info().catch(() => ({}));
+    return /waterfox/i.test(name) ? "waterfox" : "firefox";
+  }
   const brands = (navigator.userAgentData?.brands ?? []).map((b) => b.brand);
   const ua = navigator.userAgent;
   if (navigator.brave || brands.some((b) => /brave/i.test(b))) return "brave";
@@ -44,7 +49,7 @@ const TIMEOUT = Symbol("timeout");
 async function call(path, { method = "GET", body, timeout = 3000 } = {}) {
   let res;
   try {
-    const headers = { "x-rdm-browser": BROWSER };
+    const headers = { "x-rdm-browser": await BROWSER };
     if (body) headers["content-type"] = "application/json";
     res = await fetch(`${BRIDGE}${path}`, {
       method,

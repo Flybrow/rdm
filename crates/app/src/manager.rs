@@ -567,6 +567,13 @@ impl Manager {
                 done.launched = open(&signed.to_string_lossy());
                 return Ok(done);
             }
+            // Waterfox can install the unsigned package for good (signature check off: see the steps).
+            if browser == Browser::Waterfox
+                && let Some(xpi) = &done.xpi
+            {
+                done.launched = open(&xpi.to_string_lossy());
+                return Ok(done);
+            }
         }
         done.launched = open(browser.extensions_page());
         Ok(done)

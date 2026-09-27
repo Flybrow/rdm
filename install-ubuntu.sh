@@ -67,4 +67,4 @@ if ! pgrep -x rdm >/dev/null 2>&1; then
 fi
 echo
 echo "RDM est installé : cherchez « RDM » dans les applications (touche Super), ou l'icône du Bureau."
-echo "Extension du navigateur : dans RDM, carte « Extension navigateur » (Firefox, Chrome, Brave, Opera, Edge)."
+echo "Extension du navigateur : dans RDM, carte « Extension navigateur » (Firefox, Waterfox, Chrome, Brave, Opera, Edge)."

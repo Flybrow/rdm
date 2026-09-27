@@ -284,4 +284,4 @@ if [ "$was_running" -eq 1 ]; then
 fi
 
 say "RDM installed to $bin/rdm"
-echo "    Browser extension (Firefox, Chrome, Brave, Opera, Edge): in RDM, card « Extension navigateur »."
+echo "    Browser extension (Firefox, Waterfox, Chrome, Brave, Opera, Edge): in RDM, card « Extension navigateur »."

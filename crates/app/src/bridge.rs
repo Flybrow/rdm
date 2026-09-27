@@ -73,7 +73,7 @@ fn guard(manager: &Manager, headers: &HeaderMap) -> Result<(), StatusCode> {
     Ok(())
 }
 
-/// Sent by the extension: `firefox`, `chrome`, `brave`, `opera`, `edge` or `chromium`.
+/// Sent by the extension: `firefox`, `waterfox`, `chrome`, `brave`, `opera`, `edge` or `chromium`.
 const BROWSER: &str = "x-rdm-browser";
 
 /// `firefox`: whether a (`moz-extension://…`) origin was approved by the user. Such an origin not

@@ -158,7 +158,7 @@ impl App<'_> {
         let p = Palette::from_ctx(ctx);
         Modal::new(Id::new("firefox")).frame(dialog_frame(&p)).backdrop_color(backdrop(&p)).show(ctx, |ui| {
             ui.set_width(500.0);
-            if dialog_header(ui, &p, icon::PUZZLE_PIECE, p.warning, "Extension Firefox", "Une extension demande à envoyer des téléchargements à RDM.") {
+            if dialog_header(ui, &p, icon::PUZZLE_PIECE, p.warning, "Extension Firefox / Waterfox", "Une extension demande à envoyer des téléchargements à RDM.") {
                 self.manager.answer_firefox(None);
             }
             ui.add_space(14.0);
@@ -168,7 +168,7 @@ impl App<'_> {
             });
             ui.add_space(10.0);
             ui.label(
-                RichText::new("Autorisez-la seulement si vous venez d'installer ou de recharger l'extension RDM dans Firefox.")
+                RichText::new("Autorisez-la seulement si vous venez d'installer ou de recharger l'extension RDM dans Firefox ou Waterfox.")
                     .color(p.muted),
             );
             ui.add_space(16.0);

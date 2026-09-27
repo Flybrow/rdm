@@ -31,7 +31,7 @@
 | **Fedora / openSUSE** | [`rdm-*.rpm`](https://github.com/vincentxjoubert-lang/rdm/releases/latest) | `sudo dnf install ./rdm-*.rpm` |
 | **Linux (autres)** | [`rdm-linux-x64.tar.gz`](https://github.com/vincentxjoubert-lang/rdm/releases/latest) | Extraire, puis `sh install.sh` |
 | **Chrome / Brave / Opera / Edge** | depuis RDM, ou [`rdm-chromium.zip`](https://github.com/vincentxjoubert-lang/rdm/releases/latest) | Voir [Extension](#extension-du-navigateur) |
-| **Firefox** | depuis RDM, ou [`rdm-firefox.xpi`](https://github.com/vincentxjoubert-lang/rdm/releases/latest) | Voir [Extension](#extension-du-navigateur) |
+| **Firefox / Waterfox** | depuis RDM, ou [`rdm-firefox.xpi`](https://github.com/vincentxjoubert-lang/rdm/releases/latest) | Voir [Extension](#extension-du-navigateur) |
 
 ## Aperçu
 
@@ -104,12 +104,13 @@ Vie privée : un fichier envoyé est partagé avec les éditeurs d'antivirus. N'
 
 ## Extension du navigateur
 
-**L'extension est embarquée dans RDM, qui l'installe.** Carte **Extension navigateur** de la barre latérale (ou **Paramètres → Navigateur → Installer l'extension…** ; la fenêtre s'ouvre seule au premier lancement) : RDM liste les navigateurs présents — Firefox, Chrome, Brave, Opera, Edge, Chromium — et ceux d'où l'extension lui parle (« Connectée »). **Installer** écrit l'extension dans un dossier fixe (`%LOCALAPPDATA%\RDM\Extension` sous Windows, `~/RDM/Extension` sous Linux, lisible par les navigateurs Snap et Flatpak), ouvre le navigateur sur sa page des extensions et affiche les deux clics restants, avec le chemin à copier. RDM tient ce dossier à jour : l'extension suit les nouvelles versions au redémarrage du navigateur.
+**L'extension est embarquée dans RDM, qui l'installe.** Carte **Extension navigateur** de la barre latérale (ou **Paramètres → Navigateur → Installer l'extension…** ; la fenêtre s'ouvre seule au premier lancement) : RDM liste les navigateurs présents — Firefox, Waterfox, Chrome, Brave, Opera, Edge, Chromium — et ceux d'où l'extension lui parle (« Connectée »). **Installer** écrit l'extension dans un dossier fixe (`%LOCALAPPDATA%\RDM\Extension` sous Windows, `~/RDM/Extension` sous Linux, lisible par les navigateurs Snap et Flatpak), ouvre le navigateur sur sa page des extensions et affiche les deux clics restants, avec le chemin à copier. RDM tient ce dossier à jour : l'extension suit les nouvelles versions au redémarrage du navigateur.
 
 **Chrome, Brave, Opera, Edge, Chromium** (Chromium 121 ou plus) : une seule et même extension. Sur la page des extensions → **Mode développeur** → **Charger l'extension non empaquetée** → le dossier indiqué par RDM. Sans RDM : `rdm-chromium.zip` de la page des versions (ou `sh packaging/chromium/build.sh`), à extraire puis charger de la même façon. Un `.crx` ne servirait à rien : Chrome, Brave et Edge n'installent les `.crx` que depuis leur boutique. L'identifiant de l'extension est fixe (`cgailhenfaoohkakpdacohcnmppepjjl`) et le pont local n'accepte que lui.
 
 **Firefox** (version 140 ou plus) : Firefox n'installe durablement que les extensions **signées par Mozilla**.
 
+- **Waterfox** (dérivé de Firefox, même extension) : **Installer** ouvre directement le paquet `rdm-firefox.xpi` dans Waterfox → **Ajouter**. Waterfox accepte les extensions non signées : elle est installée pour de bon (testé avec Waterfox 6.7). La même autorisation dans RDM que pour Firefox est demandée au premier échange. Après une mise à jour de RDM, « Réinstaller » passe l'extension à sa nouvelle version.
 - Si la version publiée sur GitHub contient un `rdm-firefox.xpi` signé (la CI le signe quand les secrets `AMO_JWT_ISSUER` / `AMO_JWT_SECRET` d'un compte addons.mozilla.org gratuit sont définis ; l'extension n'est pas publiée pour autant), **Installer** le télécharge et Firefox propose de l'**Ajouter** : c'est définitif.
 - Sinon, RDM ouvre `about:debugging` : **Charger un module complémentaire temporaire…** → `manifest.json` du dossier indiqué. Un module temporaire disparaît à la fermeture de Firefox. Firefox Developer Edition, Nightly, ESR (`xpinstall.signatures.required` à `false`) et LibreWolf installent durablement le fichier `rdm-firefox.xpi` que RDM écrit à côté.
 - Firefox donne à chaque installation une origine aléatoire (`moz-extension://…`), qui ne peut pas être fixée comme sur Chrome : dès le chargement de l'extension, **RDM demande de l'autoriser** → **Autoriser**. Tant que ce n'est pas fait, l'icône de l'extension affiche un badge **!** et un message dans la page l'explique ; un clic sur l'icône fait réapparaître la demande (✕ la remet à 30 minutes ; **Refuser** la rejette jusqu'au redémarrage de RDM). RDM redemande après une réinstallation (ou à chaque redémarrage de Firefox pour un module temporaire).

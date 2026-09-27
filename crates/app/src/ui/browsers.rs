@@ -62,7 +62,7 @@ impl App<'_> {
                     ui,
                     icon::INFO,
                     p.faint,
-                    &format!("Extension {} · Chrome, Brave, Opera, Edge et Chromium partagent la même.", extension::version()),
+                    &format!("Extension {} · une seule pour Chrome, Brave, Opera, Edge et Chromium ; une pour Firefox et Waterfox.", extension::version()),
                     p.faint,
                     12.0,
                 );
@@ -158,26 +158,51 @@ impl App<'_> {
 
 /// What the user does in the browser to finish, with the folder / file at hand.
 fn steps(ui: &mut Ui, p: &Palette, browser: Browser, exe: Option<&Path>, done: &Installed, copied: &mut Option<String>) {
-    let page = browser.extensions_page();
-    let opened = |what: &str| if done.launched { format!("{} vient de s'ouvrir sur {what}.", browser.name()) } else { format!("Ouvrez {what} dans {}.", browser.name()) };
+    let name = browser.name();
+    // What "reopen" opens again: the page, or the package the browser was handed.
+    let mut reopen = (browser.extensions_page().to_owned(), "Rouvrir la page des extensions");
+    let opened = |what: &str| if done.launched { format!("{name} vient de s'ouvrir sur {what}.") } else { format!("Ouvrez {what} dans {name}.") };
     match browser.flavour() {
         Flavour::Chromium => {
-            step(ui, p, 1, &format!("{} Activez le « Mode développeur » (interrupteur de la page).", opened(page)));
+            step(ui, p, 1, &format!("{} Activez le « Mode développeur » (interrupteur de la page).", opened(browser.extensions_page())));
             step(ui, p, 2, "Cliquez sur « Charger l'extension non empaquetée » et choisissez ce dossier :");
             path_row(ui, p, &done.folder, copied);
             step(ui, p, 3, "L'icône RDM apparaît dans la barre d'outils : ce navigateur passe « Connectée » ici dès son premier échange.");
             note(ui, p, "RDM tient ce dossier à jour : l'extension suit les nouvelles versions au prochain démarrage du navigateur. Ne le supprimez pas.");
         }
         Flavour::Firefox if done.signed => {
-            step(ui, p, 1, if done.launched { "Firefox demande de confirmer l'ajout de « RDM » : cliquez sur « Ajouter »." } else { "Ouvrez ce fichier avec Firefox, puis cliquez sur « Ajouter » :" });
+            let package = extension::base().join("rdm-firefox-signed.xpi");
+            let first = if done.launched {
+                format!("{name} demande de confirmer l'ajout de « RDM » : cliquez sur « Ajouter ».")
+            } else {
+                format!("Ouvrez ce fichier avec {name}, puis cliquez sur « Ajouter » :")
+            };
+            step(ui, p, 1, &first);
             if !done.launched {
-                path_row(ui, p, &extension::base().join("rdm-firefox-signed.xpi"), copied);
+                path_row(ui, p, &package, copied);
             }
-            step(ui, p, 2, "Au premier échange, RDM vous demande d'autoriser cette installation de Firefox : cliquez sur « Autoriser ».");
+            step(ui, p, 2, &format!("Au premier échange, RDM vous demande d'autoriser cette installation de {name} : cliquez sur « Autoriser »."));
             note(ui, p, "Version signée par Mozilla : installée pour de bon, mise à jour avec les versions de RDM.");
+            reopen = (package.to_string_lossy().into_owned(), "Rouvrir le paquet");
+        }
+        // Waterfox installs an unsigned package for good (its signature check is off by default).
+        Flavour::Firefox if browser == Browser::Waterfox && done.xpi.is_some() => {
+            let xpi = done.xpi.as_deref().expect("checked");
+            let first = if done.launched {
+                "Waterfox propose d'ajouter « RDM » : cliquez sur « Ajouter »."
+            } else {
+                "Ouvrez ce fichier avec Waterfox (ou glissez-le dans sa fenêtre), puis cliquez sur « Ajouter » :"
+            };
+            step(ui, p, 1, first);
+            if !done.launched {
+                path_row(ui, p, xpi, copied);
+            }
+            step(ui, p, 2, "Au premier échange, RDM vous demande d'autoriser cette installation de Waterfox : cliquez sur « Autoriser ».");
+            note(ui, p, "Installée pour de bon. Après une mise à jour de RDM, réinstallez-la ici pour passer à sa nouvelle version.");
+            reopen = (xpi.to_string_lossy().into_owned(), "Rouvrir le paquet");
         }
         Flavour::Firefox => {
-            step(ui, p, 1, &format!("{} Cliquez sur « Charger un module complémentaire temporaire… ».", opened("« Ce Firefox » (about:debugging)")));
+            step(ui, p, 1, &format!("{} Cliquez sur « Charger un module complémentaire temporaire… ».", opened("about:debugging (« Ce Firefox »)")));
             step(ui, p, 2, "Choisissez le fichier manifest.json de ce dossier :");
             path_row(ui, p, &done.folder, copied);
             step(ui, p, 3, "RDM vous demande alors d'autoriser l'extension : cliquez sur « Autoriser ».");
@@ -185,7 +210,7 @@ fn steps(ui: &mut Ui, p: &Palette, browser: Browser, exe: Option<&Path>, done: &
                 ui,
                 p,
                 "Firefox n'installe durablement que les extensions signées par Mozilla : un module temporaire disparaît à la fermeture de Firefox. \
-                 Firefox Developer Edition, Nightly, ESR et LibreWolf installent durablement ce fichier :",
+                 Firefox Developer Edition, Nightly, ESR, Waterfox et LibreWolf installent durablement ce fichier :",
             );
             if let Some(xpi) = &done.xpi {
                 path_row(ui, p, xpi, copied);
@@ -194,8 +219,9 @@ fn steps(ui: &mut Ui, p: &Palette, browser: Browser, exe: Option<&Path>, done: &
     }
     if let Some(exe) = exe {
         ui.add_space(6.0);
-        if ghost_button(ui, icon::ARROW_SQUARE_OUT, "Rouvrir la page des extensions").clicked() {
-            let _ = extension::launch(exe, page);
+        let (target, label) = reopen;
+        if ghost_button(ui, icon::ARROW_SQUARE_OUT, label).clicked() {
+            let _ = extension::launch(exe, &target);
         }
     }
 }

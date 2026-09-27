@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "RDM — Rust Download Manager",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Envoie les téléchargements et les vidéos détectées vers RDM.",
   "minimum_chrome_version": "121",
   "browser_specific_settings": {
