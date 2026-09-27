@@ -5,10 +5,14 @@ cd "$(dirname "$0")/.."
 for f in background.js shared.js; do node --check --input-type=module < "$f" && echo "syntax OK  $f"; done
 for f in content.js youtube.js capture.js relay.js; do node --check "$f" && echo "syntax OK  $f"; done
 
-# Chrome manifest as is, Firefox manifest as derived by packaging/firefox/build.sh.
+# Chrome manifest as is, Firefox manifest as derived by packaging/firefox/build.sh, and the
+# Chromium package (packaging/chromium/build.sh) identical to the source.
 firefox=$(mktemp -d)
-trap 'rm -rf "$firefox"' EXIT
+chromium=$(mktemp -d)
+trap 'rm -rf "$firefox" "$chromium"' EXIT
 sh ../packaging/firefox/build.sh "$firefox" >/dev/null
+sh ../packaging/chromium/build.sh "$chromium/ext" >/dev/null
+[ ! -e "$chromium/ext/test" ] && cmp -s manifest.json "$chromium/ext/manifest.json" || { echo "Chromium build differs from the source" >&2; exit 1; }
 FIREFOX="$firefox" node -e '
 const fs = require("fs");
 const read = (p) => JSON.parse(fs.readFileSync(p, "utf8"));

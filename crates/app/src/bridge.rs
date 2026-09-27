@@ -62,8 +62,18 @@ pub async fn serve(manager: Arc<Manager>, listener: TcpListener) {
 }
 
 fn guard(manager: &Manager, headers: &HeaderMap) -> Result<(), StatusCode> {
-    guard_with(headers, |origin| manager.firefox_allowed(origin))
+    guard_with(headers, |origin| manager.firefox_allowed(origin))?;
+    // Which browser the extension runs in (the extension window shows the connected ones).
+    if headers.contains_key(ORIGIN)
+        && let Some(browser) = headers.get(BROWSER).and_then(|v| v.to_str().ok())
+    {
+        manager.browser_seen(browser);
+    }
+    Ok(())
 }
+
+/// Sent by the extension: `firefox`, `chrome`, `brave`, `opera`, `edge` or `chromium`.
+const BROWSER: &str = "x-rdm-browser";
 
 /// `firefox`: whether a (`moz-extension://…`) origin was approved by the user. Such an origin not
 /// approved (yet) gets 401 — the extension then says "approve me in RDM", not "RDM is not
@@ -266,6 +276,8 @@ async fn record_cancel(State(manager): State<Arc<Manager>>, headers: HeaderMap, 
 }
 
 async fn show(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> StatusCode {
+    // The extension's toolbar button: an explicit request, so a put-off approval question returns.
+    manager.firefox_wake();
     if let Err(status) = guard(&manager, &headers) {
         return status;
     }

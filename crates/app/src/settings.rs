@@ -45,6 +45,8 @@ pub struct Settings {
     pub virustotal_key: String,
     /// Look for a new release on GitHub at start and once a day.
     pub check_updates: bool,
+    /// The browser-extension window was offered once on its own (first launch).
+    pub extension_offered: bool,
 }
 
 impl Default for Settings {
@@ -66,6 +68,7 @@ impl Default for Settings {
             theme: Theme::System,
             virustotal_key: String::new(),
             check_updates: true,
+            extension_offered: false,
         }
     }
 }
@@ -123,9 +126,21 @@ pub fn save_json(name: &str, value: &impl Serialize) {
         let _ = fs::create_dir_all(dir);
     }
     let tmp = path.with_extension("json.tmp");
-    if fs::write(&tmp, bytes).is_ok() {
+    // Synced before the rename: a power cut right after must not leave an empty list behind.
+    let written = fs::File::create(&tmp).and_then(|mut f| {
+        std::io::Write::write_all(&mut f, &bytes)?;
+        f.sync_all()
+    });
+    if written.is_ok() {
         let _ = fs::rename(tmp, path);
     }
+}
+
+/// `path` + `suffix`, without treating anything as an extension (`a.mp4` → `a.mp4.rdm`).
+pub fn with_suffix(path: &std::path::Path, suffix: &str) -> PathBuf {
+    let mut p = path.as_os_str().to_owned();
+    p.push(suffix);
+    p.into()
 }
 
 #[cfg(test)]

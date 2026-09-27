@@ -22,7 +22,7 @@ use crate::{
     virustotal::{self, Report},
 };
 
-fn dialog_frame(p: &Palette) -> Frame {
+pub(super) fn dialog_frame(p: &Palette) -> Frame {
     Frame::new()
         .fill(p.surface)
         .corner_radius(22)
@@ -31,12 +31,12 @@ fn dialog_frame(p: &Palette) -> Frame {
         .shadow(eframe::egui::Shadow { offset: [0, 24], blur: 64, spread: 0, color: Color32::from_black_alpha(if p.dark { 170 } else { 60 }) })
 }
 
-fn backdrop(p: &Palette) -> Color32 {
+pub(super) fn backdrop(p: &Palette) -> Color32 {
     Color32::from_black_alpha(if p.dark { 150 } else { 80 })
 }
 
 /// Icon tile, title, subtitle and a close button; `true` when the button is clicked.
-fn dialog_header(ui: &mut Ui, p: &Palette, glyph: &str, color: Color32, title: &str, subtitle: &str) -> bool {
+pub(super) fn dialog_header(ui: &mut Ui, p: &Palette, glyph: &str, color: Color32, title: &str, subtitle: &str) -> bool {
     ui.horizontal(|ui| {
         let (tile, _) = ui.allocate_exact_size(Vec2::splat(46.0), Sense::hover());
         ui.painter().add(widgets::gradient(ui, tile, 14, color, color.lerp_to_gamma(p.accent2, 0.45), vec2(0.7, 0.7)));
@@ -95,7 +95,12 @@ impl App<'_> {
         });
         let dismissed = modal.should_close();
         let (close, action) = modal.inner;
+        let mut close = close;
         match action {
+            Some(Action::OpenBrowsers) => {
+                close = true; // one window at a time
+                self.open_browsers();
+            }
             Some(Action::CheckUpdates) => self.manager.check_updates(true),
             Some(Action::InstallUpdate) => {
                 if !self.manager.install_update()
@@ -237,9 +242,14 @@ fn settings_form(
                 .wrap(),
             );
         });
-        if ghost_button(ui, icon::ARROW_COUNTER_CLOCKWISE, "Liste par défaut").clicked() {
-            s.captured = domain::default_captured();
-        }
+        ui.horizontal(|ui| {
+            if ghost_button(ui, icon::ARROW_COUNTER_CLOCKWISE, "Liste par défaut").clicked() {
+                s.captured = domain::default_captured();
+            }
+            if accent_button(ui, icon::PUZZLE_PIECE, "Installer l'extension…").clicked() {
+                action = Some(Action::OpenBrowsers);
+            }
+        });
     });
 
     section(ui, p, icon::SHIELD_CHECK, "VirusTotal", |ui| {

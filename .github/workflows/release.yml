@@ -35,11 +35,12 @@ jobs:
         if: runner.os == 'Linux'
         run: sh extension/test/check.sh
 
-      - name: Firefox extension build + lint
+      - name: Extension builds (Firefox + Chromium) + lint
         if: runner.os == 'Linux'
         run: |
           sh packaging/firefox/build.sh
-          npx --yes web-ext lint --source-dir target/firefox
+          sh packaging/chromium/build.sh
+          npx --yes web-ext@8 lint --source-dir target/firefox
 
       - name: Dependency audit (RustSec)
         if: runner.os == 'Linux'
@@ -62,8 +63,14 @@ jobs:
           Expand-Archive $zip "$env:LOCALAPPDATA\Programs\wix3"
           powershell -ExecutionPolicy Bypass -File packaging/windows/build-msi.ps1 -NoBuild
 
+      # Release Firefox installs only packages signed by Mozilla. With the repository secrets
+      # AMO_JWT_ISSUER / AMO_JWT_SECRET (free addons.mozilla.org account, "unlisted": nothing is
+      # published), tagged builds get a signed .xpi, which RDM installs for good in one click.
       - name: Stage
         shell: bash
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
         run: |
           mkdir dist
           if [ "$RUNNER_OS" = Windows ]; then
@@ -73,8 +80,14 @@ jobs:
             cp target/release/rdm crates/app/assets/rdm.png rdm-linux-x64/ && cp -r packaging/linux/. rdm-linux-x64/
             tar -czf dist/rdm-linux-x64.tar.gz rdm-linux-x64
             cp target/debian/*.deb target/generate-rpm/*.rpm dist/
-            (cd target/firefox && zip -qr ../../dist/rdm-firefox.xpi .)
-            (cd extension && zip -qr ../dist/rdm-chrome-extension.zip . -x 'test/*')
+            cp target/rdm-chromium.zip dist/
+            if [ -n "$AMO_JWT_ISSUER" ] && [ -n "$AMO_JWT_SECRET" ] && [ "${GITHUB_REF#refs/tags/v}" != "$GITHUB_REF" ]; then
+              npx --yes web-ext@8 sign --channel=unlisted --source-dir target/firefox --artifacts-dir target/signed \
+                --api-key "$AMO_JWT_ISSUER" --api-secret "$AMO_JWT_SECRET"
+              cp target/signed/*.xpi dist/rdm-firefox.xpi
+            else
+              (cd target/firefox && zip -qr ../../dist/rdm-firefox.xpi .)
+            fi
           fi
 
       - uses: actions/upload-artifact@v4

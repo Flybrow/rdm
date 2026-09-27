@@ -61,6 +61,10 @@ impl App<'_> {
                 if self.limit_card(ui, &p).clicked() {
                     actions.push(Action::OpenSettings);
                 }
+                ui.add_space(2.0);
+                if super::browsers::card(ui, &p, super::browsers::connected(&self.manager)) {
+                    actions.push(Action::OpenBrowsers);
+                }
                 if let Some(action) = self.update_card(ui, &p) {
                     actions.push(action);
                 }

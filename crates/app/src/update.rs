@@ -96,12 +96,66 @@ pub async fn check(client: &reqwest::Client) -> Result<Option<Release>, String> 
     }))
 }
 
+/// Where release assets may be downloaded from (HTTPS, GitHub only).
+const TRUSTED: [&str; 3] = ["https://github.com/", "https://objects.githubusercontent.com/", "https://release-assets.githubusercontent.com/"];
+const FIREFOX_XPI: &str = "rdm-firefox.xpi";
+const MAX_XPI: u64 = 20 << 20;
+
+/// The signed Firefox package of the latest release, written to `dest`: release Firefox installs
+/// it for good (an unsigned package only temporarily). `Ok(false)` when there is none — no
+/// release, a release older than this RDM, or a package Mozilla has not signed.
+pub async fn signed_firefox_xpi(client: &reqwest::Client, dest: &std::path::Path) -> Result<bool, String> {
+    let repo = repo().ok_or("dépôt GitHub non configuré")?;
+    let res = client
+        .get(format!("https://api.github.com/repos/{repo}/releases/latest"))
+        .header("accept", "application/vnd.github+json")
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|_| "GitHub est injoignable".to_owned())?;
+    if res.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
+    let body = res.error_for_status().map_err(|e| format!("GitHub a répondu {}", e.status().map_or(0, |s| s.as_u16())))?;
+    let r: ApiRelease = serde_json::from_slice(&body.bytes().await.map_err(|_| "GitHub est injoignable".to_owned())?)
+        .map_err(|_| "réponse inattendue de GitHub".to_owned())?;
+    if r.draft || r.prerelease || is_newer(env!("CARGO_PKG_VERSION"), &r.tag_name) {
+        return Ok(false);
+    }
+    let Some(asset) = r.assets.iter().find(|a| a.name == FIREFOX_XPI) else { return Ok(false) };
+    if !TRUSTED.iter().any(|p| asset.browser_download_url.starts_with(p)) {
+        return Ok(false);
+    }
+    let res = client
+        .get(&asset.browser_download_url)
+        .timeout(Duration::from_secs(60))
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|_| "téléchargement de l'extension impossible".to_owned())?;
+    if res.content_length().is_some_and(|n| n > MAX_XPI) {
+        return Ok(false);
+    }
+    let bytes = res.bytes().await.map_err(|_| "téléchargement de l'extension interrompu".to_owned())?;
+    // Mozilla's signature files: without them release Firefox refuses the package.
+    let signed = |marker: &[u8]| bytes.windows(marker.len()).any(|w| w == marker);
+    if bytes.len() as u64 > MAX_XPI || !(signed(b"META-INF/mozilla.rsa") || signed(b"META-INF/cose.sig")) {
+        return Ok(false);
+    }
+    if let Some(dir) = dest.parent() {
+        tokio::fs::create_dir_all(dir).await.map_err(|e| e.to_string())?;
+    }
+    let tmp = crate::settings::with_suffix(dest, ".tmp");
+    tokio::fs::write(&tmp, &bytes).await.map_err(|e| e.to_string())?;
+    tokio::fs::rename(&tmp, dest).await.map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 /// Downloads the installer (only from GitHub, over HTTPS); `progress` gets the fraction done.
 pub async fn download(client: &reqwest::Client, url: &str, progress: impl Fn(f32)) -> Result<PathBuf, String> {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
-    let trusted = ["https://github.com/", "https://objects.githubusercontent.com/", "https://release-assets.githubusercontent.com/"];
-    if !trusted.iter().any(|p| url.starts_with(p)) {
+    if !TRUSTED.iter().any(|p| url.starts_with(p)) {
         return Err("adresse de téléchargement inattendue".into());
     }
     let res = client.get(url).send().await.and_then(reqwest::Response::error_for_status).map_err(|_| "téléchargement impossible".to_owned())?;

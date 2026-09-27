@@ -2,6 +2,7 @@
 
 mod hls;
 mod merged;
+mod pace;
 pub mod mux;
 pub mod net;
 mod probe;
@@ -22,7 +23,7 @@ use url::Url;
 
 pub use hls::{HlsInfo, Variant};
 pub use merged::PART_SUFFIXES;
-pub use probe::{Probe, probe, sanitize_file_name, suggest_file_name};
+pub use probe::{Probe, probe, probe_once, sanitize_file_name, suggest_file_name};
 pub use rate::RateLimit;
 pub use reqwest::{
     Client,
@@ -166,7 +167,7 @@ pub fn client() -> reqwest::Result<Client> {
         .tcp_keepalive(Duration::from_secs(30))
         .pool_max_idle_per_host(usize::from(domain::MAX_CONNECTIONS))
         .pool_idle_timeout(Duration::from_secs(60))
-        .connect_timeout(Duration::from_secs(15))
+        .connect_timeout(Duration::from_secs(20))
         .read_timeout(Duration::from_secs(30))
         .redirect(redirects)
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36")

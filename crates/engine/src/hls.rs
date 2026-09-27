@@ -27,6 +27,8 @@ const MAX_PLAYLIST_BYTES: u64 = 16 << 20;
 const MAX_PART_BYTES: u64 = 256 << 20;
 /// Segments held in memory while waiting to be written in order.
 const MAX_IN_FLIGHT: usize = 16;
+/// Resume state written this often while downloading (data synced first).
+const CHECKPOINT: Duration = Duration::from_secs(20);
 
 pub(crate) fn is_playlist(url: &Url, content_type: Option<&str>) -> bool {
     url.path().to_ascii_lowercase().ends_with(".m3u8")
@@ -110,19 +112,30 @@ pub(crate) async fn run(
 ) -> Result<Outcome, EngineError> {
     let http = Http { client, headers: &job.headers, origin: &job.url, keys: Mutex::default(), limit: &job.limit };
     let n = job.connections;
-    let variants = match load(&http, &job.url).await? {
-        Playlist::Media { parts, .. } => return download(&http, parts, &job.target, n, &progress, &cancel).await,
-        Playlist::Master(variants) => variants,
+    // Playlists load with retries: a pause must not wait for them.
+    let plan = async {
+        match load(&http, &job.url).await? {
+            Playlist::Media { parts, .. } => Ok((parts, None)),
+            Playlist::Master(variants) => choose(&http, &variants).await,
+        }
     };
-
-    let (video, audio) = choose(&http, &variants).await?;
+    let (video, audio) = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Ok(Outcome::Paused),
+        plan = plan => plan?,
+    };
     let Some(audio) = audio else {
         return download(&http, video, &job.target, n, &progress, &cancel).await;
     };
     let split = Split::new(&job.target, &cancel);
     let v = download(&http, video, &split.video, n, &split.progress[0], &split.stop);
     let a = async {
-        let Playlist::Media { parts, .. } = load(&http, &audio).await? else {
+        let playlist = tokio::select! {
+            biased;
+            () = split.stop.cancelled() => return Ok(Outcome::Paused),
+            playlist = load(&http, &audio) => playlist?,
+        };
+        let Playlist::Media { parts, .. } = playlist else {
             return Err(EngineError::Playlist("nested master playlist"));
         };
         download(&http, parts, &split.audio, (n / 4).max(1), &split.progress[1], &split.stop).await
@@ -188,10 +201,18 @@ async fn download(
         .map(|part| fetch_part(http, part))
         .buffered(usize::from(connections).clamp(1, MAX_IN_FLIGHT));
 
+    // A crash or a kill mid-download loses at most this much (the segmented engine does the same).
+    let mut checkpoint = tokio::time::interval_at(tokio::time::Instant::now() + CHECKPOINT, CHECKPOINT);
     let result = loop {
         let next = tokio::select! {
             biased;
             () = cancel.cancelled() => break Ok(Outcome::Paused),
+            _ = checkpoint.tick() => {
+                if file.flush().await.is_ok() && file.sync_data().await.is_ok() {
+                    let _ = save_state(&state, &resume).await;
+                }
+                continue;
+            }
             next = fetched.next() => next,
         };
         match next {
@@ -220,12 +241,19 @@ async fn download(
         other => {
             // Data on disk first, then an atomic state (temp + rename), like the segmented engine.
             file.sync_data().await?;
-            let tmp = state.with_extension("rdm.tmp");
-            fs::write(&tmp, serde_json::to_vec(&resume).map_err(std::io::Error::from)?).await?;
-            fs::rename(tmp, &state).await?;
+            save_state(&state, &resume).await?;
             other
         }
     }
+}
+
+async fn save_state(state: &Path, resume: &Resume) -> std::io::Result<()> {
+    let tmp = state.with_extension("rdm.tmp");
+    let mut file = fs::File::create(&tmp).await?;
+    file.write_all(&serde_json::to_vec(resume)?).await?;
+    file.sync_all().await?;
+    drop(file);
+    fs::rename(tmp, state).await
 }
 
 async fn load(http: &Http<'_>, url: &Url) -> Result<Playlist, EngineError> {

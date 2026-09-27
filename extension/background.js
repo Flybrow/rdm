@@ -1,11 +1,13 @@
 import { isCapturable, isHls, isMediaType, isMediaUrl, siteOf } from "./shared.js";
 
-// Chrome/Brave (`chrome`) and Firefox (`browser`): same promise-based API.
+// Chrome, Brave, Opera, Edge (`chrome`) and Firefox (`browser`): same promise-based API.
 const ext = globalThis.browser ?? globalThis.chrome;
 
 const BRIDGE = "http://127.0.0.1:9614";
 const MIN_MEDIA_BYTES = 256 * 1024; // ignore stream fragments and previews
 const MAX_ITEMS_PER_TAB = 60; // bounds session storage on pages that stream many unique URLs
+/** Checks in with RDM this often while the browser runs (RDM shows the extension as connected). */
+const HEARTBEAT_MINUTES = 5;
 
 // Service workers sleep: detected media lives in session storage (memory only), keyed per tab.
 const tabKey = (tabId) => `tab:${tabId}`;
@@ -19,48 +21,104 @@ const media = {
 let queue = Promise.resolve();
 const serially = (task) => (queue = queue.then(task).catch(() => {}));
 
+/** Which browser this is, for RDM's extension window (`x-rdm-browser`). */
+const BROWSER = (() => {
+  if (typeof globalThis.browser?.runtime?.getBrowserInfo === "function") return "firefox";
+  const brands = (navigator.userAgentData?.brands ?? []).map((b) => b.brand);
+  const ua = navigator.userAgent;
+  if (navigator.brave || brands.some((b) => /brave/i.test(b))) return "brave";
+  if (brands.some((b) => /opera/i.test(b)) || /\bOPR\//.test(ua)) return "opera";
+  if (brands.some((b) => /edge/i.test(b)) || /\bEdg\//.test(ua)) return "edge";
+  if (brands.includes("Google Chrome")) return "chrome";
+  if (brands.includes("Chromium")) return "chromium";
+  return "chrome";
+})();
+
 // ── Bridge ────────────────────────────────────────────────────────────────
 const isWeb = (url) => /^https?:\/\//i.test(url ?? "");
 
-async function call(path, { method = "GET", body, timeout = 1500 } = {}) {
-  let res = null;
+/** RDM is running but did not answer in time (busy disk, starting up): not the same as absent. */
+const TIMEOUT = Symbol("timeout");
+
+/** A response, `TIMEOUT`, or `null` when RDM is not running. */
+async function call(path, { method = "GET", body, timeout = 3000 } = {}) {
+  let res;
   try {
+    const headers = { "x-rdm-browser": BROWSER };
+    if (body) headers["content-type"] = "application/json";
     res = await fetch(`${BRIDGE}${path}`, {
       method,
       body: body && JSON.stringify(body),
-      headers: body ? { "content-type": "application/json" } : undefined,
+      headers,
       signal: AbortSignal.timeout(timeout),
     });
-  } catch {
-    return null;
+  } catch (e) {
+    return e?.name === "TimeoutError" ? TIMEOUT : null;
   }
   // GETs carry no `Origin` in Firefox: only a POST tells whether RDM approved this extension.
   if (method === "POST") setPaired(res.status !== UNPAIRED);
   return res;
 }
 
+const answered = (res) => res && res !== TIMEOUT;
+
 /**
  * Firefox gives each install a random origin, which RDM only accepts once the user approved it in
  * RDM's window (401 until then). The toolbar badge says so instead of silently failing.
  */
 const UNPAIRED = 401;
+const UNPAIRED_TEXT = "Autorisez l'extension dans la fenêtre de RDM, puis réessayez";
 function setPaired(ok) {
   // No in-memory "already set" shortcut: the badge outlives a sleeping service worker's state.
   ext.action.setBadgeText({ text: ok ? "" : "!" }).catch(() => {});
   if (!ok) ext.action.setBadgeBackgroundColor({ color: "#d97706" }).catch(() => {});
-  ext.action.setTitle({ title: ok ? "RDM" : "RDM — autorisez l'extension dans la fenêtre de RDM" }).catch(() => {});
+  ext.action.setTitle({ title: ok ? "RDM" : `RDM — ${UNPAIRED_TEXT.toLowerCase()}` }).catch(() => {});
 }
 
-/** Asks RDM for approval right away (Firefox), not at the first download, which it would refuse. */
-const pair = () => call("/ping", { method: "POST" });
+/** Tells RDM this browser is here (and asks for approval right away on Firefox). */
+async function checkIn() {
+  await call("/ping", { method: "POST" });
+  await appConfig(); // refreshes the cached capture list
+}
 
 /** Outcome of a hand-off: true (accepted), "unpaired" (awaiting approval in RDM) or false. */
 const outcome = (res, accepted) => (res?.status === accepted ? true : res?.status === UNPAIRED ? "unpaired" : false);
 
-/** The app's settings (capture list) — `null` when RDM is not running. */
+const CONFIG = "config";
+const cachedConfig = async () => (await ext.storage.session.get(CONFIG).catch(() => ({})))[CONFIG] ?? null;
+/** RDM is gone: until it answers again, downloads are left to the browser without a pause. */
+const forgetConfig = () => ext.storage.session.remove(CONFIG).catch(() => {});
+
+/**
+ * The app's settings (capture list) — `null` when RDM is not running. When RDM is running but slow
+ * to answer, its last known list still applies: a busy moment must not let downloads slip past.
+ */
 async function appConfig() {
-  const res = await call("/config", { timeout: 600 });
-  return res?.ok ? res.json().catch(() => null) : null;
+  const res = await call("/config");
+  if (answered(res) && res.ok) {
+    const config = await res.json().catch(() => null);
+    if (typeof config?.captured === "string") {
+      await ext.storage.session.set({ [CONFIG]: config }).catch(() => {});
+      return config;
+    }
+  }
+  if (res === TIMEOUT) return cachedConfig();
+  if (!res) await forgetConfig();
+  return null;
+}
+
+/**
+ * The capture list, without delay when RDM answered recently: a fast download (small file, fibre)
+ * finishes within one round trip to RDM, and a finished download can no longer be handed over.
+ * The cached list is refreshed in the background (the check-ins keep it current anyway).
+ */
+async function captureList() {
+  const cached = await cachedConfig();
+  if (typeof cached?.captured === "string") {
+    appConfig();
+    return cached.captured;
+  }
+  return (await appConfig())?.captured ?? null;
 }
 
 /** Cookie store of a tab: private windows (and Firefox containers) have their own. */
@@ -101,11 +159,14 @@ async function context({ url, referrer, topUrl, storeId, userAgent, bare = false
   };
 }
 
+/** true (accepted), "unpaired" (awaiting approval in RDM) or false (RDM absent or refusing). */
 async function sendToApp(request) {
   const { url, audio_url, filename } = request;
   if (!isWeb(url) || (audio_url && !isWeb(audio_url))) return false;
   const body = { ...(await context(request)), audio_url, filename };
-  const res = await call("/add", { method: "POST", body, timeout: 5000 });
+  // RDM answers /add at once (the file is inspected afterwards): a long wait means trouble, but a
+  // busy machine deserves a few seconds.
+  const res = await call("/add", { method: "POST", body, timeout: 8000 });
   return outcome(res, 202);
 }
 
@@ -113,25 +174,42 @@ async function sendToApp(request) {
 async function probe(request) {
   if (!isWeb(request.url)) return null;
   const res = await call("/probe", { method: "POST", body: await context(request), timeout: 25_000 });
-  return res?.ok ? res.json().catch(() => null) : null;
+  return answered(res) && res.ok ? res.json().catch(() => null) : null;
 }
 
 /** Whether RDM can really fetch this link with these headers (`{ ok, status, size }`). */
 async function check(request) {
   if (!isWeb(request.url)) return null;
   const res = await call("/check", { method: "POST", body: await context(request), timeout: 15_000 });
-  return res?.ok ? res.json().catch(() => null) : null;
+  return answered(res) && res.ok ? res.json().catch(() => null) : null;
 }
 
 /** Opens a recording session in RDM for this YouTube page; returns its token (or null). */
 async function recordStart(page, filename) {
   const youtube = /^https:\/\/(www|m)\.youtube\.com\/watch\?/.test(page ?? "");
   if (!youtube || typeof filename !== "string" || !filename.trim()) return null;
-  const res = await call("/record/start", { method: "POST", body: { page, filename }, timeout: 5000 });
+  const res = await call("/record/start", { method: "POST", body: { page, filename }, timeout: 8000 });
   if (res?.status === UNPAIRED) return "unpaired";
-  const data = res?.ok ? await res.json().catch(() => null) : null;
+  const data = answered(res) && res.ok ? await res.json().catch(() => null) : null;
   return typeof data?.token === "string" ? data.token : null;
 }
+
+// ── Feedback in the page ─────────────────────────────────────────────────
+/** A short message in the page (content.js draws it); `tabId` defaults to the tab in front. */
+async function toast(text, tabId) {
+  const id = tabId ?? (await ext.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []))[0]?.id;
+  if (id == null || id < 0) return;
+  // Pages without content scripts (browser pages, the PDF viewer) just stay silent.
+  ext.tabs.sendMessage(id, { kind: "toast", text }, { frameId: 0 }).catch(() => {});
+}
+
+const nameOf = (url) => {
+  try {
+    return decodeURIComponent(new URL(url).pathname.split("/").pop() || "") || new URL(url).hostname;
+  } catch {
+    return url;
+  }
+};
 
 // ── Download interception ────────────────────────────────────────────────
 async function intercept(item) {
@@ -139,18 +217,23 @@ async function intercept(item) {
   // Private windows stay private (RDM keeps a history); other extensions' downloads are theirs.
   if (!isWeb(url) || item.incognito || item.byExtensionId) return;
   const filename = (item.filename ?? "").split(/[\\/]/).pop() || undefined;
-  const config = await appConfig();
-  if (!config || !(isCapturable(config.captured, filename ?? "") || isCapturable(config.captured, url))) return;
+  const captured = await captureList();
+  if (captured == null || !(isCapturable(captured, filename ?? "") || isCapturable(captured, url))) return;
   // Pause first, cancel only once RDM accepted: a refused hand-off never loses the download. A
   // download that can no longer be paused (a small file already finished) stays the browser's:
   // handing it over too would fetch the same file twice.
   if (!(await ext.downloads.pause(item.id).then(() => true, () => false))) return;
-  const accepted = await sendToApp({ url, filename, referrer: item.referrer, storeId: item.cookieStoreId });
-  if (accepted === true) {
+  const sent = await sendToApp({ url, filename, referrer: item.referrer, storeId: item.cookieStoreId });
+  if (sent === true) {
     await ext.downloads.cancel(item.id).catch(() => {});
     await ext.downloads.erase({ id: item.id }).catch(() => {});
+    toast(`✓ Envoyé à RDM : ${filename ?? nameOf(url)}`);
   } else {
     await ext.downloads.resume(item.id).catch(() => {});
+    if (sent === "unpaired") return toast(`✗ ${UNPAIRED_TEXT}`);
+    // RDM closed since its last answer: say it once, then leave downloads alone until it is back.
+    await forgetConfig();
+    toast("✗ RDM n'a pas répondu : le navigateur garde ce téléchargement");
   }
 }
 
@@ -233,19 +316,31 @@ ext.runtime.onMessage.addListener((msg, sender, reply) => {
   }
 });
 
-// ── Toolbar button & context menu ────────────────────────────────────────
-ext.action.onClicked.addListener(() => call("/show", { method: "POST" }));
+// ── Toolbar button, context menu, check-ins ──────────────────────────────
+ext.action.onClicked.addListener(async (tab) => {
+  const res = await call("/show", { method: "POST" });
+  if (res?.status === UNPAIRED) toast(`✗ ${UNPAIRED_TEXT}`, tab?.id);
+  else if (!answered(res)) toast("✗ RDM n'est pas lancé : ouvrez RDM, puis réessayez", tab?.id);
+});
+
+ext.contextMenus.onClicked.addListener(async ({ linkUrl, srcUrl, pageUrl, frameUrl }, tab) => {
+  const url = linkUrl || srcUrl;
+  if (!isWeb(url)) return toast("✗ Ce lien ne se télécharge pas hors de la page (adresse non web)", tab?.id);
+  const sent = await sendToApp({ url, referrer: frameUrl || pageUrl, topUrl: pageUrl, storeId: await storeOf(tab) });
+  const text = sent === true ? `✓ Envoyé à RDM : ${nameOf(url)}` : sent === "unpaired" ? `✗ ${UNPAIRED_TEXT}` : "✗ RDM n'est pas lancé : ouvrez RDM, puis réessayez";
+  toast(text, tab?.id);
+});
+
+function start() {
+  ext.alarms.create("rdm-check-in", { periodInMinutes: HEARTBEAT_MINUTES });
+  checkIn();
+}
 
 ext.runtime.onInstalled.addListener(() => {
-  pair();
+  start();
   ext.contextMenus
     .removeAll()
     .then(() => ext.contextMenus.create({ id: "rdm", title: "Télécharger avec RDM", contexts: ["link", "video", "audio"] }));
 });
-ext.runtime.onStartup.addListener(pair);
-
-ext.contextMenus.onClicked.addListener(async ({ linkUrl, srcUrl, pageUrl, frameUrl }, tab) => {
-  const url = linkUrl || srcUrl;
-  if (!isWeb(url)) return;
-  sendToApp({ url, referrer: frameUrl || pageUrl, topUrl: pageUrl, storeId: await storeOf(tab) });
-});
+ext.runtime.onStartup.addListener(start);
+ext.alarms.onAlarm.addListener(({ name }) => name === "rdm-check-in" && checkIn());

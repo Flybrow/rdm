@@ -75,10 +75,12 @@ fn toolbar(ui: &mut Ui, p: &Palette, filter: Filter, count: usize, searching: bo
 }
 
 /// How a status reads and which colour carries it.
-fn status_style(p: &Palette, status: &Status, recording: bool) -> (&'static str, Color32) {
-    match status {
-        Status::Running if recording => ("ENREGISTREMENT", p.danger),
+fn status_style(p: &Palette, e: &Entry) -> (&'static str, Color32) {
+    match e.download.status() {
+        Status::Running if e.download.is_recording() => ("ENREGISTREMENT", p.danger),
         Status::Running => ("EN COURS", p.accent),
+        Status::Queued if e.retry.is_some() => ("NOUVEL ESSAI", p.warning),
+        Status::Queued if e.resolving => ("PRÉPARATION", p.accent),
         Status::Queued => ("EN FILE", p.muted),
         Status::Paused => ("EN PAUSE", p.warning),
         Status::Completed => ("TERMINÉ", p.success),
@@ -97,7 +99,7 @@ fn card(ui: &mut Ui, p: &Palette, e: &Entry, actions: &mut Vec<Action>) -> bool 
     let status = d.status();
     let recording = d.is_recording();
     let running = *status == Status::Running;
-    let (label, color) = status_style(p, status, recording);
+    let (label, color) = status_style(p, e);
 
     // Frame: lifts on hover.
     let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.14);
@@ -121,6 +123,10 @@ fn card(ui: &mut Ui, p: &Palette, e: &Entry, actions: &mut Vec<Action>) -> bool 
     let mut buttons: Vec<(&str, &str, Option<Color32>, Action)> = Vec::new();
     match status {
         Status::Running | Status::Failed(_) if recording => {}
+        Status::Queued if e.retry.is_some() => {
+            buttons.push((icon::ARROW_CLOCKWISE, "Réessayer maintenant", Some(p.accent), Action::Resume(d.id)));
+            buttons.push((icon::PAUSE, "Suspendre", None, Action::Pause(d.id)));
+        }
         Status::Running | Status::Queued => buttons.push((icon::PAUSE, "Suspendre", None, Action::Pause(d.id))),
         Status::Paused | Status::Failed(_) => buttons.push((icon::PLAY, "Reprendre", Some(p.accent), Action::Resume(d.id))),
         Status::Completed => {
@@ -201,6 +207,13 @@ fn detail_line(e: &Entry, status: &Status, recording: bool, done: u64, total: u6
         Status::Running => format!("{} / {size} · {}{eta} · {conns} connexion(s)", bytes(done), speed(e.speed)),
         Status::Completed => format!("{} · {}", bytes(total.max(done)), e.download.target.parent().map_or(String::new(), |d| d.display().to_string())),
         Status::Paused => format!("{} / {size}", bytes(done)),
+        Status::Queued if e.retry.is_some() => {
+            let retry = e.retry.as_ref().expect("checked");
+            let left = retry.at.saturating_duration_since(std::time::Instant::now()).as_secs();
+            let when = if left == 0 { "maintenant".to_owned() } else { format!("dans {}", duration(left)) };
+            return (format!("{} · nouvel essai {when}", retry.reason), p.warning);
+        }
+        Status::Queued if e.resolving => "analyse du lien auprès du serveur…".to_owned(),
         Status::Queued => format!("{} / {size} · démarre dès qu'une place se libère", bytes(done)),
         Status::Failed(reason) if recording => return (format!("{reason} — relancez l'enregistrement depuis la page"), p.danger),
         Status::Failed(reason) => return (format!("{reason} — ▶ pour réessayer"), p.danger),

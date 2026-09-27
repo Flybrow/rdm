@@ -1,7 +1,7 @@
 //! Application service: owns the queue, schedules downloads and orchestrates the engine.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -22,8 +22,9 @@ use tokio::{runtime::Handle, sync::Semaphore};
 use url::Url;
 
 use crate::{
+    extension::{self, Browser, Flavour},
     notify,
-    settings::{Settings, save_json},
+    settings::{Settings, save_json, with_suffix},
     update,
     virustotal::{self, Report, Stage},
 };
@@ -33,11 +34,25 @@ const UPDATE_EVERY: Duration = Duration::from_secs(24 * 3600);
 const STORE: &str = "downloads.json";
 /// Speeds, idle recordings and the list on disk are refreshed at this pace.
 const TICK: Duration = Duration::from_millis(500);
+/// While transfers run, the list (with progress) is written every this many ticks (10 s).
+const PROGRESS_SAVE_TICKS: u32 = 20;
 /// Samples of the total speed kept for the chart: one minute.
 pub const HISTORY: usize = 120;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 /// A recording that receives nothing for this long is considered abandoned.
 const RECORDING_IDLE: Duration = Duration::from_secs(120);
+/// A new link shows in the list at once; asking its server for the real file name takes at most this.
+const NAME_TIMEOUT: Duration = Duration::from_secs(10);
+/// The same link sent again within this window is the same request (double click, page retrying).
+const DUPLICATE_WINDOW: Duration = Duration::from_secs(5);
+/// Transient failures (network down, server busy) are retried on their own this many times in a
+/// row without progress — about half an hour — before the download is reported as failed.
+const AUTO_RETRIES: u32 = 15;
+
+/// 5 s, 10 s, 20 s, 40 s, 80 s, then every 2 minutes.
+fn retry_delay(retries: u32) -> Duration {
+    Duration::from_secs((5u64 << retries.min(5)).min(120))
+}
 /// Never written to disk: session cookies stay in memory only.
 const SECRET_HEADERS: [&str; 2] = ["cookie", "authorization"];
 
@@ -78,9 +93,23 @@ pub struct Entry {
     /// `name` in lower case, for the search box.
     pub search_key: String,
     pub category: Category,
+    /// Just added: the server is being asked for the file's real name; not started before.
+    pub resolving: bool,
+    /// Waiting to retry after a transient failure, and why it failed.
+    pub retry: Option<Retry>,
     headers: Vec<(String, String)>,
     cancel: Option<CancellationToken>,
     last: u64,
+    /// Automatic retries in a row without progress.
+    retries: u32,
+    added: Instant,
+}
+
+/// A download back in the queue after a transient failure (network down, busy server).
+#[derive(Debug, Clone)]
+pub struct Retry {
+    pub at: Instant,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -108,20 +137,33 @@ impl Entry {
         let progress = Arc::new(Progress::default());
         progress.downloaded.store(downloaded, Relaxed);
         progress.total.store(total, Relaxed);
-        let name = download.target.file_name().map_or_else(|| download.url.to_string(), |n| n.to_string_lossy().into_owned());
-        Self {
-            search_key: name.to_lowercase(),
-            name,
+        let mut entry = Self {
+            search_key: String::new(),
+            name: String::new(),
             category: download.category(),
             download,
             progress,
             speed: 0.0,
             sha256: None,
             scan: Scan::None,
+            resolving: false,
+            retry: None,
             headers,
             cancel: None,
             last: downloaded,
-        }
+            retries: 0,
+            added: Instant::now(),
+        };
+        entry.named();
+        entry
+    }
+
+    /// Derives what the list shows from the target (after creation, or a rename before start).
+    fn named(&mut self) {
+        let d = &self.download;
+        self.name = d.target.file_name().map_or_else(|| d.url.to_string(), |n| n.to_string_lossy().into_owned());
+        self.search_key = self.name.to_lowercase();
+        self.category = d.category();
     }
 
     /// Seconds left at the current speed.
@@ -141,9 +183,33 @@ impl Entry {
         *self.download.status() == Status::Running && !self.download.is_recording()
     }
 
+    /// A recording follows the browser's playback: it cannot be paused from here.
+    fn pause(&mut self) {
+        if !self.download.is_recording() && self.download.pause().is_ok() {
+            self.retry = None;
+            if let Some(cancel) = self.cancel.take() {
+                cancel.cancel();
+            }
+        }
+    }
+
+    /// The user asked: no waiting for an automatic retry, and a fresh retry budget.
+    fn resume(&mut self) {
+        if self.download.enqueue().is_ok() || self.retry.is_some() {
+            self.retry = None;
+            self.retries = 0;
+        }
+    }
+
+    /// Can the scheduler start it now?
+    fn startable(&self, now: Instant) -> bool {
+        *self.download.status() == Status::Queued && !self.resolving && self.retry.as_ref().is_none_or(|r| r.at <= now)
+    }
+
     /// Queued → running: the engine job, with a fresh cancel token.
     fn start(&mut self, limit: &Arc<RateLimit>) -> Option<Launch> {
         self.download.start().ok()?;
+        self.retry = None;
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
         let job = engine::Job {
@@ -264,6 +330,32 @@ pub struct Manager {
     /// One VirusTotal analysis at a time: the free API allows 4 requests per minute.
     scan_gate: Arc<Semaphore>,
     update: Mutex<update::State>,
+    /// Browsers the extension has talked from (key → Unix time): the extension window shows which
+    /// ones are connected.
+    browsers: Mutex<BTreeMap<String, u64>>,
+    installs: Mutex<HashMap<Browser, Install>>,
+}
+
+const BROWSERS_FILE: &str = "browsers.json";
+
+/// Installing the extension into one browser, as the extension window shows it.
+#[derive(Debug, Clone)]
+pub enum Install {
+    Working,
+    Done(Installed),
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct Installed {
+    /// The unpacked extension (Chromium-based browsers: "load unpacked" from here).
+    pub folder: PathBuf,
+    /// The browser was opened on its extensions page (or on the package to confirm).
+    pub launched: bool,
+    /// Firefox: the signed package is installing for good (Firefox asks to confirm).
+    pub signed: bool,
+    /// Firefox: the unsigned package, for the editions that accept one.
+    pub xpi: Option<PathBuf>,
 }
 
 /// Firefox gives each install of an extension a random origin (`moz-extension://<uuid>`), which
@@ -274,7 +366,12 @@ struct FirefoxPairing {
     pending: Option<String>,
     /// Refused this session: never asked again until RDM restarts.
     refused: HashSet<String>,
+    /// "Later" (✕): the extension's periodic check-ins do not bring the question back before this.
+    snoozed_until: Option<Instant>,
 }
+
+/// How long "later" on the Firefox question lasts, unless the user clicks the extension's button.
+const FIREFOX_SNOOZE: Duration = Duration::from_secs(30 * 60);
 
 const FIREFOX_FILE: &str = "firefox.json";
 
@@ -318,6 +415,13 @@ impl Manager {
             virustotal: OnceLock::new(),
             scan_gate: Arc::new(Semaphore::new(1)),
             update: Mutex::default(),
+            browsers: Mutex::new(
+                fs::read(crate::settings::config_file(BROWSERS_FILE))
+                    .ok()
+                    .and_then(|b| serde_json::from_slice(&b).ok())
+                    .unwrap_or_default(),
+            ),
+            installs: Mutex::default(),
         });
         this.spawn_ticker();
         this.spawn_update_checks();
@@ -365,13 +469,19 @@ impl Manager {
         if ff.paired.as_deref() == Some(origin) {
             return true;
         }
-        if ff.pending.is_none() && !ff.refused.contains(origin) {
+        let snoozed = ff.snoozed_until.is_some_and(|t| Instant::now() < t);
+        if ff.pending.is_none() && !ff.refused.contains(origin) && !snoozed {
             ff.pending = Some(origin.to_owned());
             drop(ff);
             self.show();
             self.repaint();
         }
         false
+    }
+
+    /// The user clicked the extension's button: a question put off with "later" comes back now.
+    pub fn firefox_wake(&self) {
+        lock(&self.firefox).snoozed_until = None;
     }
 
     /// The Firefox origin waiting for the user's approval, if any.
@@ -391,8 +501,74 @@ impl Manager {
             Some(false) => {
                 ff.refused.insert(origin);
             }
-            None => {}
+            None => ff.snoozed_until = Some(Instant::now() + FIREFOX_SNOOZE),
         }
+    }
+
+    /// The extension reported which browser it runs in (`x-rdm-browser`).
+    pub fn browser_seen(&self, key: &str) {
+        let Some(browser) = Browser::from_key(key) else { return };
+        let now = unix_now();
+        let mut seen = lock(&self.browsers);
+        let before = seen.insert(browser.key().to_owned(), now);
+        // Written when news, not on every request (recordings post chunks many times a second).
+        if before.is_none_or(|t| now.saturating_sub(t) > 600) {
+            let copy = seen.clone();
+            drop(seen);
+            save_json(BROWSERS_FILE, &copy);
+            self.repaint();
+        }
+    }
+
+    /// When the extension was last heard from, per browser (Unix time).
+    pub fn browser_last_seen(&self, browser: Browser) -> Option<u64> {
+        lock(&self.browsers).get(browser.key()).copied()
+    }
+
+    pub fn install_state(&self, browser: Browser) -> Option<Install> {
+        lock(&self.installs).get(&browser).cloned()
+    }
+
+    /// Prepares the extension for `browser` and opens the browser where the user confirms it.
+    pub fn install_extension(self: &Arc<Self>, browser: Browser) {
+        if matches!(lock(&self.installs).insert(browser, Install::Working), Some(Install::Working)) {
+            return; // already on it
+        }
+        self.repaint();
+        let this = self.clone();
+        self.rt.spawn(async move {
+            let state = match this.install(browser).await {
+                Ok(done) => Install::Done(done),
+                Err(reason) => Install::Failed(reason),
+            };
+            lock(&this.installs).insert(browser, state);
+            this.repaint();
+        });
+    }
+
+    async fn install(&self, browser: Browser) -> Result<Installed, String> {
+        let flavour = browser.flavour();
+        let blocking = |e: tokio::task::JoinError| e.to_string();
+        let exe = tokio::task::spawn_blocking(move || browser.find()).await.map_err(blocking)?;
+        let folder = tokio::task::spawn_blocking(move || extension::write(flavour))
+            .await
+            .map_err(blocking)?
+            .map_err(|e| format!("impossible d'écrire l'extension : {e}"))?;
+        let mut done = Installed { folder, launched: false, signed: false, xpi: None };
+        let open = |target: &str| exe.as_deref().is_some_and(|exe| extension::launch(exe, target).is_ok());
+        if flavour == Flavour::Firefox {
+            done.xpi = tokio::task::spawn_blocking(extension::write_xpi).await.map_err(blocking)?.ok();
+            let signed = extension::base().join("rdm-firefox-signed.xpi");
+            if let Some(client) = self.web()
+                && update::signed_firefox_xpi(&client, &signed).await.unwrap_or(false)
+            {
+                done.signed = true;
+                done.launched = open(&signed.to_string_lossy());
+                return Ok(done);
+            }
+        }
+        done.launched = open(browser.extensions_page());
+        Ok(done)
     }
 
     pub fn view<R>(&self, f: impl FnOnce(&[Entry]) -> R) -> R {
@@ -440,70 +616,76 @@ impl Manager {
         })
     }
 
+    /// Shows the download in the list at once; without a name from the page, the server is asked
+    /// for the real one in the background (bounded), and the download starts right after.
     pub fn add(self: &Arc<Self>, req: AddRequest) {
+        let headers = req.headers();
+        let given = req.filename.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(engine::sanitize_file_name);
+        let provisional = given.clone().unwrap_or_else(|| engine::suggest_file_name(&req.url, None));
+        let Some(id) = self.insert(req.url.clone(), req.audio_url, &provisional, headers.clone(), given.is_none()) else {
+            return; // the very same link, just sent twice
+        };
+        if given.is_some() {
+            self.schedule();
+            return;
+        }
         let this = self.clone();
         self.rt.spawn(async move {
-            let headers = req.headers();
-            let name = match req.filename.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-                Some(n) => engine::sanitize_file_name(n),
-                None => this.suggest_name(&req.url, &to_header_map(&headers)).await,
-            };
-            this.insert(req.url, req.audio_url, &name, headers);
+            let name = tokio::time::timeout(NAME_TIMEOUT, this.suggest_name(&req.url, &to_header_map(&headers))).await.ok().flatten();
+            this.resolved(id, name);
             this.schedule();
         });
     }
 
     /// Name from the server; HLS gets the extension of what will actually be written.
-    async fn suggest_name(&self, url: &Url, headers: &HeaderMap) -> String {
-        let Ok(probe) = engine::probe(&self.client, url, headers).await else {
-            return engine::suggest_file_name(url, None);
-        };
+    async fn suggest_name(&self, url: &Url, headers: &HeaderMap) -> Option<String> {
+        let probe = engine::probe_once(&self.client, url, headers).await.ok()?;
         if !probe.hls {
-            return probe.file_name;
+            return Some(probe.file_name);
         }
         let fmp4 = engine::hls_info(&self.client, url, headers).await.is_ok_and(|i| i.fmp4);
         let stem = probe.file_name.rsplit_once('.').map_or(probe.file_name.as_str(), |(s, _)| s);
-        format!("{stem}.{}", if fmp4 { "mp4" } else { "ts" })
+        Some(format!("{stem}.{}", if fmp4 { "mp4" } else { "ts" }))
     }
 
-    /// ▶ on a paused / failed download: back in the queue.
+    /// The server's name for a new download (if it gave one): its target follows, unless it
+    /// already started meanwhile. Either way it may start now.
+    fn resolved(&self, id: DownloadId, name: Option<String>) {
+        let settings = self.settings();
+        let mut entries = lock(&self.entries);
+        let Some(i) = entries.iter().position(|e| e.download.id == id) else { return };
+        if let Some(name) = name.filter(|n| *n != entries[i].name)
+            && matches!(entries[i].download.status(), Status::Queued | Status::Paused)
+        {
+            let target = unique_path(&settings.target_dir(&name), &name, &entries, Some(id));
+            entries[i].download.target = target;
+            entries[i].named();
+        }
+        entries[i].resolving = false;
+        drop(entries);
+        self.changed();
+    }
+
+    /// ▶ on a paused / failed download (or one waiting to retry): back in the queue, now.
     pub fn resume(self: &Arc<Self>, id: DownloadId) {
-        self.update(id, |e| {
-            let _ = e.download.enqueue();
-        });
+        self.update(id, Entry::resume);
         self.schedule();
     }
 
     pub fn pause(self: &Arc<Self>, id: DownloadId) {
-        self.update(id, |e| {
-            // A recording follows the browser's playback: it cannot be paused from here.
-            if !e.download.is_recording()
-                && e.download.pause().is_ok()
-                && let Some(cancel) = e.cancel.take()
-            {
-                cancel.cancel();
-            }
-        });
+        self.update(id, Entry::pause);
         self.schedule();
     }
 
     /// One pass under one lock (queued downloads are paused too: nothing starts afterwards).
     pub fn pause_all(&self) {
-        for e in lock(&self.entries).iter_mut().filter(|e| !e.download.is_recording()) {
-            if e.download.pause().is_ok()
-                && let Some(cancel) = e.cancel.take()
-            {
-                cancel.cancel();
-            }
-        }
+        lock(&self.entries).iter_mut().for_each(Entry::pause);
         self.changed();
     }
 
     /// Paused and failed downloads go back in the queue, in their list order.
     pub fn resume_all(self: &Arc<Self>) {
-        for e in lock(&self.entries).iter_mut() {
-            let _ = e.download.enqueue();
-        }
+        lock(&self.entries).iter_mut().for_each(Entry::resume);
         self.changed();
         self.schedule();
     }
@@ -709,7 +891,7 @@ impl Manager {
         let name = engine::sanitize_file_name(name);
         let settings = self.settings();
         let mut entries = lock(&self.entries);
-        let target = unique_path(&settings.target_dir(&name), &name, &entries);
+        let target = unique_path(&settings.target_dir(&name), &name, &entries, None);
         let download = Download::recording(page, target.clone());
         let id = download.id;
         entries.push(Entry::new(download, Vec::new(), 0, 0));
@@ -853,6 +1035,7 @@ impl Manager {
             return;
         }
         let max = usize::from(self.with_settings(|s| s.max_parallel));
+        let now = Instant::now();
         let launches: Vec<Launch> = {
             let mut entries = lock(&self.entries);
             let mut busy = lock(&self.busy);
@@ -862,7 +1045,7 @@ impl Manager {
                 if free == 0 {
                     break;
                 }
-                if *e.download.status() != Status::Queued || busy.contains(&e.download.id) {
+                if !e.startable(now) || busy.contains(&e.download.id) {
                     continue;
                 }
                 if let Some(launch) = e.start(&self.limit) {
@@ -884,18 +1067,30 @@ impl Manager {
         self.inflight.fetch_add(1, AcqRel);
         let this = self.clone();
         self.rt.spawn(async move {
-            let result = engine::run(&this.client, &job, progress, cancel).await;
+            let before = progress.downloaded.load(Relaxed);
+            let result = engine::run(&this.client, &job, progress.clone(), cancel).await;
+            let progressed = progress.downloaded.load(Relaxed) > before;
             let mut finished = None;
             this.update(id, |e| {
                 e.cancel = None;
+                if progressed {
+                    e.retries = 0;
+                }
                 let _ = match &result {
                     Ok(Outcome::Completed) => {
                         mark_from_internet(&e.download.target);
                         let _ = e.download.start(); // a pause may have raced the last byte
                         finished = Some(e.name.clone());
+                        e.retries = 0;
                         e.download.complete()
                     }
                     Ok(Outcome::Paused) => Ok(()),
+                    // Network down, server busy: back in the queue, retried later on its own.
+                    Err(err) if !err.is_permanent() && e.retries < AUTO_RETRIES && e.download.retry_later().is_ok() => {
+                        e.retry = Some(Retry { at: Instant::now() + retry_delay(e.retries), reason: describe(err) });
+                        e.retries += 1;
+                        Ok(())
+                    }
                     Err(err) => e.download.fail(describe(err)),
                 };
             });
@@ -910,17 +1105,26 @@ impl Manager {
         });
     }
 
-    fn insert(&self, url: Url, audio: Option<Url>, name: &str, headers: Vec<(String, String)>) -> DownloadId {
+    /// `None` when the same link was added a moment ago (a double click, a page asking twice).
+    fn insert(&self, url: Url, audio: Option<Url>, name: &str, headers: Vec<(String, String)>, resolving: bool) -> Option<DownloadId> {
         let settings = self.settings();
         let mut entries = lock(&self.entries);
-        let target = unique_path(&settings.target_dir(name), name, &entries);
+        let twice = entries.iter().rev().take_while(|e| e.added.elapsed() < DUPLICATE_WINDOW).any(|e| {
+            e.download.url == url && e.download.audio == audio && !matches!(e.download.status(), Status::Failed(_))
+        });
+        if twice {
+            return None;
+        }
+        let target = unique_path(&settings.target_dir(name), name, &entries, None);
         let mut download = Download::new(url, target, settings.connections);
         download.audio = audio;
         let id = download.id;
-        entries.push(Entry::new(download, headers, 0, 0));
+        let mut entry = Entry::new(download, headers, 0, 0);
+        entry.resolving = resolving;
+        entries.push(entry);
         drop(entries);
         self.changed();
-        id
+        Some(id)
     }
 
     fn update<R>(&self, id: DownloadId, f: impl FnOnce(&mut Entry) -> R) -> Option<R> {
@@ -976,12 +1180,23 @@ impl Manager {
         self.rt.spawn(async move {
             let mut tick = tokio::time::interval(TICK);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut ticks = 0u32;
             loop {
                 tick.tick().await;
                 let Some(this) = weak.upgrade() else { return };
                 this.reap_idle_recordings();
-                if this.tick() {
+                let (moving, retry_due) = this.tick();
+                if moving {
                     this.repaint();
+                }
+                if retry_due {
+                    this.schedule();
+                }
+                // Progress written now and then while transfers run: after a crash the list shows
+                // where each download was (the resume point itself lives in its `.rdm` file).
+                ticks = ticks.wrapping_add(1);
+                if moving && ticks.is_multiple_of(PROGRESS_SAVE_TICKS) {
+                    this.dirty.store(true, Release);
                 }
                 if this.dirty.load(Acquire) {
                     let _ = tokio::task::spawn_blocking(move || this.persist()).await;
@@ -990,23 +1205,27 @@ impl Manager {
         });
     }
 
-    /// Updates speeds and the history; `true` while the UI has something moving to show (a running
-    /// download, or the chart still scrolling back to zero).
-    fn tick(&self) -> bool {
-        let (mut active, mut total) = (false, 0.0);
+    /// Updates speeds and the history. Returns whether the UI has something moving to show (a
+    /// running download, a retry countdown, the chart still scrolling back to zero), and whether
+    /// a download waiting to retry is due.
+    fn tick(&self) -> (bool, bool) {
+        let (mut active, mut total, mut due) = (false, 0.0, false);
+        let now = Instant::now();
         for e in lock(&self.entries).iter_mut() {
             let (done, _, _) = e.progress.snapshot();
             let running = *e.download.status() == Status::Running;
             let instant = done.saturating_sub(e.last) as f64 / TICK.as_secs_f64();
             e.speed = if running { e.speed * 0.6 + instant * 0.4 } else { 0.0 };
             e.last = done;
-            active |= running;
+            let waiting = *e.download.status() == Status::Queued && e.retry.is_some();
+            active |= running || waiting || e.resolving;
+            due |= waiting && e.startable(now);
             total += e.speed;
         }
         let mut history = lock(&self.history);
         history.pop_front();
         history.push_back(total as f32);
-        active || history.iter().any(|&s| s > 0.0)
+        (active || history.iter().any(|&s| s > 0.0), due)
     }
 }
 
@@ -1018,13 +1237,13 @@ fn load_entries() -> Vec<Entry> {
     stored
         .into_iter()
         .map(|mut s| {
-            // Interrupted by exit: downloads are resumable and wait for the user; a recording
-            // cannot continue without its browser tab.
+            // Interrupted by exit (quit, shutdown, crash): downloads pick up where they were, from
+            // their resume point; a recording cannot continue without its browser tab.
             if *s.download.status() == Status::Running {
                 let _ = if s.download.is_recording() {
                     s.download.fail("enregistrement interrompu (RDM fermé)")
                 } else {
-                    s.download.pause()
+                    s.download.retry_later()
                 };
             }
             let mut entry = Entry::new(s.download, s.headers, s.downloaded, s.total);
@@ -1112,7 +1331,9 @@ pub fn header_map(req: &AddRequest) -> HeaderMap {
     to_header_map(&req.headers())
 }
 
-fn unique_path(dir: &Path, name: &str, taken: &[Entry]) -> PathBuf {
+/// A free path for `name` in `dir`: neither on disk (with or without leftovers of an unfinished
+/// download) nor planned by another entry of the list (`except`: the entry being renamed).
+fn unique_path(dir: &Path, name: &str, taken: &[Entry], except: Option<DownloadId>) -> PathBuf {
     let (stem, ext) = name.rsplit_once('.').map_or((name, None), |(s, e)| (s, Some(e)));
     (0u32..)
         .map(|i| match (i, ext) {
@@ -1120,14 +1341,16 @@ fn unique_path(dir: &Path, name: &str, taken: &[Entry]) -> PathBuf {
             (_, Some(ext)) => dir.join(format!("{stem} ({i}).{ext}")),
             (_, None) => dir.join(format!("{stem} ({i})")),
         })
-        .find(|p| !p.exists() && !taken.iter().any(|e| &e.download.target == p))
+        .find(|p| {
+            !p.exists()
+                && !with_suffix(p, engine::STATE_SUFFIX).exists()
+                && !taken.iter().any(|e| &e.download.target == p && Some(e.download.id) != except)
+        })
         .expect("unbounded range always yields a free name")
 }
 
-fn with_suffix(target: &Path, suffix: &str) -> PathBuf {
-    let mut p = target.as_os_str().to_owned();
-    p.push(suffix);
-    p.into()
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {

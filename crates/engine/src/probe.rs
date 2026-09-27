@@ -27,6 +27,11 @@ pub async fn probe(client: &Client, url: &Url, headers: &HeaderMap) -> Result<Pr
     }
 }
 
+/// A single attempt, for when an answer is only nice to have (naming a new download quickly).
+pub async fn probe_once(client: &Client, url: &Url, headers: &HeaderMap) -> Result<Probe, EngineError> {
+    try_probe(client, url, headers).await
+}
+
 async fn try_probe(client: &Client, url: &Url, headers: &HeaderMap) -> Result<Probe, EngineError> {
     let res = client
         .get(url.clone())

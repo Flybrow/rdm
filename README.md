@@ -30,8 +30,8 @@
 | **Debian / Ubuntu** | [`rdm_*.deb`](https://github.com/vincentxjoubert-lang/rdm/releases/latest) | `sudo apt install ./rdm_*.deb` |
 | **Fedora / openSUSE** | [`rdm-*.rpm`](https://github.com/vincentxjoubert-lang/rdm/releases/latest) | `sudo dnf install ./rdm-*.rpm` |
 | **Linux (autres)** | [`rdm-linux-x64.tar.gz`](https://github.com/vincentxjoubert-lang/rdm/releases/latest) | Extraire, puis `sh install.sh` |
-| **Chrome / Brave** | dossier `extension/` | Voir [Extension](#extension-chrome--brave--firefox) |
-| **Firefox** | [`rdm-firefox.xpi`](https://github.com/vincentxjoubert-lang/rdm/releases/latest) | Voir [Extension](#extension-chrome--brave--firefox) |
+| **Chrome / Brave / Opera / Edge** | depuis RDM, ou [`rdm-chromium.zip`](https://github.com/vincentxjoubert-lang/rdm/releases/latest) | Voir [Extension](#extension-du-navigateur) |
+| **Firefox** | depuis RDM, ou [`rdm-firefox.xpi`](https://github.com/vincentxjoubert-lang/rdm/releases/latest) | Voir [Extension](#extension-du-navigateur) |
 
 ## Aperçu
 
@@ -57,11 +57,15 @@ RDM cherche une nouvelle version sur ce dépôt au démarrage puis une fois par 
 | `crates/domain`  | Domaine          | Agrégat `Download` (états, transitions), `Segment`, catégories et formats  |
 | `crates/engine`  | Infrastructure   | Moteur HTTP multi-connexions, HLS, fusion MP4, anti-SSRF, limiteur         |
 | `crates/app`     | Application + UI | File d'attente, réglages, pont `127.0.0.1:9614`, interface egui, zone de notification |
-| `extension/`     | Navigateur       | Chrome/Brave/Firefox MV3 : interception, détection vidéo, extracteur YouTube |
+| `extension/`     | Navigateur       | Chrome/Brave/Opera/Edge/Firefox MV3 : interception, détection vidéo, extracteur YouTube (embarquée dans RDM, qui l'installe) |
 
 ## Fonctions
 
-- **Moteur** : jusqu'à 64 connexions par fichier (IDM : 32), segmentation dynamique (une connexion libre reprend la moitié du plus gros segment restant), pause/reprise, retries avec backoff.
+- **Moteur** : jusqu'à 64 connexions par fichier (IDM : 32), segmentation dynamique (une connexion libre reprend la moitié du plus gros segment restant), pause/reprise.
+- **Connexions adaptatives** : un téléchargement démarre avec 8 connexions, double chaque seconde tant que tout va bien, puis en ajoute une à la fois ; quand des connexions échouent (délai dépassé, coupure, serveur qui refuse avec 429/503), il en retire un quart (la moitié pour un refus) et rend leur part aux autres. Un Wi-Fi faible, une box saturée ou un serveur pointilleux trouvent ainsi leur rythme au lieu d'échouer en « délai dépassé ».
+- **Coupures réseau** : la dernière connexion d'un téléchargement réessaie jusqu'à 3 minutes sans données (Wi-Fi qui décroche, mise en veille, serveur momentanément absent) ; au-delà, RDM remet le téléchargement dans la file et **réessaie seul** (après 5 s, 10 s, 20 s… puis toutes les 2 minutes, environ une demi-heure), en reprenant là où il s'était arrêté. La carte affiche la raison et le compte à rebours, avec un bouton « Réessayer maintenant ». Un serveur sans reprise possible recommence le fichier depuis le début (5 fois au plus).
+- **Ajout instantané** : un lien envoyé par le navigateur apparaît aussitôt dans la liste ; le nom réel du fichier est demandé au serveur en arrière-plan (10 s au plus). Un même lien reçu deux fois en 5 s n'est ajouté qu'une fois.
+- **Redémarrage** : les téléchargements en cours à la fermeture de RDM (ou à l'extinction) reprennent seuls au lancement suivant.
 - **Vitesse** : fichiers creux (*sparse*) sous Windows (sans cela, NTFS remplit de zéros le fichier avant chaque segment éloigné : le disque écrivait tout deux fois et les connexions attendaient) ; pas de bridage « EcoQoS » de Windows 11 quand RDM est en arrière-plan ; threads réseau et disque en priorité supérieure à la normale sous Windows.
 - **Reprise après coupure** : un point de reprise est enregistré toutes les 20 s pendant le téléchargement (données synchronisées d'abord). Un plantage, une extinction ou une fermeture de session ne fait perdre que les dernières secondes ; sous Linux, la fermeture de session (SIGTERM) arrête RDM proprement.
 - **File d'attente** : N téléchargements simultanés (3 par défaut), les suivants démarrent seuls.
@@ -96,26 +100,23 @@ Il faut **une clé API gratuite** (une seule fois) : créer un compte sur virust
 
 Vie privée : un fichier envoyé est partagé avec les éditeurs d'antivirus. N'analysez pas vos documents personnels. Le nom du fichier n'est pas transmis (seulement son extension).
 
-## Extension (Chrome / Brave / Firefox)
+## Extension du navigateur
 
-Le dossier `extension/` se charge tel quel dans Chrome et Brave. Firefox utilise une copie générée : Chrome exige un *service worker* en arrière-plan et signale `background.scripts` comme une erreur en MV3, alors que Firefox ne connaît que `background.scripts`. Un seul manifeste ne peut pas satisfaire les deux.
+**L'extension est embarquée dans RDM, qui l'installe.** Carte **Extension navigateur** de la barre latérale (ou **Paramètres → Navigateur → Installer l'extension…** ; la fenêtre s'ouvre seule au premier lancement) : RDM liste les navigateurs présents — Firefox, Chrome, Brave, Opera, Edge, Chromium — et ceux d'où l'extension lui parle (« Connectée »). **Installer** écrit l'extension dans un dossier fixe (`%LOCALAPPDATA%\RDM\Extension` sous Windows, `~/RDM/Extension` sous Linux, lisible par les navigateurs Snap et Flatpak), ouvre le navigateur sur sa page des extensions et affiche les deux clics restants, avec le chemin à copier. RDM tient ce dossier à jour : l'extension suit les nouvelles versions au redémarrage du navigateur.
 
-**Chrome / Brave** (version 121 ou plus)
+**Chrome, Brave, Opera, Edge, Chromium** (Chromium 121 ou plus) : une seule et même extension. Sur la page des extensions → **Mode développeur** → **Charger l'extension non empaquetée** → le dossier indiqué par RDM. Sans RDM : `rdm-chromium.zip` de la page des versions (ou `sh packaging/chromium/build.sh`), à extraire puis charger de la même façon. Un `.crx` ne servirait à rien : Chrome, Brave et Edge n'installent les `.crx` que depuis leur boutique. L'identifiant de l'extension est fixe (`cgailhenfaoohkakpdacohcnmppepjjl`) et le pont local n'accepte que lui.
 
-1. `brave://extensions` (ou `chrome://extensions`) → **mode développeur**.
-2. Si une ancienne version de RDM est présente, la **supprimer** : l'identifiant de l'extension est désormais fixe (`cgailhenfaoohkakpdacohcnmppepjjl`), et le pont local n'accepte que lui.
-3. **Charger l'extension non empaquetée** → dossier `extension/`. Après une mise à jour du dossier, cliquer sur ↻ (Recharger) et **Tout effacer** dans la page « Erreurs » pour retirer les anciens messages.
+**Firefox** (version 140 ou plus) : Firefox n'installe durablement que les extensions **signées par Mozilla**.
 
-**Firefox** (version 140 ou plus)
+- Si la version publiée sur GitHub contient un `rdm-firefox.xpi` signé (la CI le signe quand les secrets `AMO_JWT_ISSUER` / `AMO_JWT_SECRET` d'un compte addons.mozilla.org gratuit sont définis ; l'extension n'est pas publiée pour autant), **Installer** le télécharge et Firefox propose de l'**Ajouter** : c'est définitif.
+- Sinon, RDM ouvre `about:debugging` : **Charger un module complémentaire temporaire…** → `manifest.json` du dossier indiqué. Un module temporaire disparaît à la fermeture de Firefox. Firefox Developer Edition, Nightly, ESR (`xpinstall.signatures.required` à `false`) et LibreWolf installent durablement le fichier `rdm-firefox.xpi` que RDM écrit à côté.
+- Firefox donne à chaque installation une origine aléatoire (`moz-extension://…`), qui ne peut pas être fixée comme sur Chrome : dès le chargement de l'extension, **RDM demande de l'autoriser** → **Autoriser**. Tant que ce n'est pas fait, l'icône de l'extension affiche un badge **!** et un message dans la page l'explique ; un clic sur l'icône fait réapparaître la demande (✕ la remet à 30 minutes ; **Refuser** la rejette jusqu'au redémarrage de RDM). RDM redemande après une réinstallation (ou à chaque redémarrage de Firefox pour un module temporaire).
 
-1. Générer la version Firefox : `sh packaging/firefox/build.sh` (Linux) ou `powershell -ExecutionPolicy Bypass -File packaging\firefox\build.ps1` (Windows) → dossier `target/firefox/`.
-2. Test : `about:debugging#/runtime/this-firefox` → **Charger un module temporaire** → `target/firefox/manifest.json`. Un module temporaire disparaît à la fermeture de Firefox.
-3. Installation durable : signer le paquet `rdm-firefox.xpi` produit par la CI (`npx web-ext sign --channel=unlisted --source-dir target/firefox`, compte addons.mozilla.org gratuit), puis l'ouvrir dans Firefox.
-4. Dès le chargement de l'extension (RDM lancé), **RDM demande d'autoriser l'extension Firefox** : Firefox donne à chaque installation une origine aléatoire (`moz-extension://…`), qui ne peut pas être fixée comme sur Chrome. Cliquer sur **Autoriser**. Tant que ce n'est pas fait, l'icône de l'extension affiche un badge **!** : un clic dessus fait réapparaître la demande (✕ remet la demande à plus tard ; **Refuser** la rejette jusqu'au redémarrage de RDM). RDM redemande après une réinstallation (ou à chaque redémarrage de Firefox pour un module temporaire).
+Si RDM est fermé, le navigateur télécharge normalement.
 
-Lancer RDM. Si RDM est fermé, le navigateur télécharge normalement.
-
-- Les téléchargements aux formats capturés passent à RDM, avec les cookies et le referer (jamais en navigation privée). Un petit fichier que le navigateur a déjà fini de télécharger reste au navigateur (pas de double téléchargement).
+- Les téléchargements aux formats capturés passent à RDM, avec les cookies et le referer (jamais en navigation privée). Un petit fichier que le navigateur a déjà fini de télécharger reste au navigateur (pas de double téléchargement). Si RDM est occupé et répond lentement, l'extension applique la dernière liste de formats connue plutôt que de laisser passer le fichier.
+- Chaque envoi est confirmé par un petit message dans la page (« ✓ Envoyé à RDM : fichier.zip ») ; en cas d'échec, le message dit pourquoi (RDM fermé, extension à autoriser) et le navigateur garde le téléchargement.
+- L'extension se signale à RDM toutes les 5 minutes tant que le navigateur est ouvert : la fenêtre des extensions de RDM sait ainsi quels navigateurs sont connectés.
 - Les envois explicites (bouton ⬇, clic droit) utilisent les cookies de l'onglet lui-même : fenêtre privée et conteneurs Firefox ne mélangent jamais leurs cookies avec ceux de la session normale.
 - Au survol d'une vidéo, le bouton **⬇** ouvre la liste des qualités.
 - Clic droit sur un lien, une vidéo ou un son → **Télécharger avec RDM**. Le bouton de l'extension affiche la fenêtre RDM.
@@ -147,7 +148,7 @@ Non pris en charge : les contenus DRM (Netflix, Widevine, FairPlay) et la fusion
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --release
-sh extension/test/check.sh        # extension (Node ≥ 20), manifestes Chrome et Firefox compris
+sh extension/test/check.sh        # extension (Node ≥ 20), manifestes et paquets Chromium et Firefox compris
 ```
 
 Dépendances de compilation sous Linux : un compilateur C et `pkg-config` (`sudo apt install build-essential pkg-config` ou `sudo dnf install gcc pkg-config`). Aucune bibliothèque GTK n'est nécessaire.
@@ -174,4 +175,4 @@ Le script installe les outils de compilation et, si besoin, Rust (rustup), compi
 
 Icônes : les deux sources vectorielles sont dans `crates/app/assets/icon/` (`rdm-small.svg`, plus épaisse, sert jusqu'à 32 px). `python3 packaging/icons/render.py` régénère toutes les tailles : `.ico` Windows, icônes Linux (16 à 512 px + SVG), icônes de l'extension, images de la fenêtre et de la zone de notification.
 
-La CI GitHub (`.github/workflows/release.yml`) compile, lint, teste (Rust et extension, `web-ext lint` pour Firefox), audite les dépendances, puis produit les binaires Windows et Linux, le `.deb`, le `.rpm` et `rdm-firefox.xpi`.
+La CI GitHub (`.github/workflows/release.yml`) compile, lint, teste (Rust et extension, `web-ext lint` pour Firefox), audite les dépendances, puis produit les binaires Windows et Linux, le `.deb`, le `.rpm`, `rdm-chromium.zip` et `rdm-firefox.xpi` (signé par Mozilla quand les clés AMO sont configurées).

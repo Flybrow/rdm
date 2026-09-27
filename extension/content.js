@@ -94,7 +94,7 @@
   const download = (url, filename, audio_url, via = {}) => async () => {
     const ok = await send({ kind: "download", url, audio_url, filename, ...via });
     show(note(ok === true ? "✓ Envoyé à RDM" : ok === "unpaired" ? UNPAIRED_NOTE : "✗ RDM n'est pas lancé"));
-    setTimeout(hide, 1400);
+    setTimeout(hide, ok === true ? 1400 : 5000);
   };
   const action = (title, detail, url, filename, audio_url, via) =>
     li("action", title, detail, download(url, filename, audio_url, via));
@@ -438,7 +438,33 @@
   });
   document.addEventListener("click", (e) => e.composedPath().includes(host) || (menu.hidden = true), true);
 
+  // ── Toasts: what happened to a download handed to RDM (top frame only) ──
+  let toastEl = null;
+  function toast(text) {
+    if (top !== self || typeof text !== "string") return;
+    toastEl?.remove();
+    const el = document.createElement("rdm-toast");
+    const shadow = el.attachShadow({ mode: "closed" });
+    shadow.innerHTML = `
+      <style>
+        :host { all: initial; position: fixed; right: 18px; bottom: 18px; z-index: 2147483647;
+                font: 13px/1.4 Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+        .t { max-width: min(420px, 80vw); padding: 11px 16px; border-radius: 14px; color: #eaeef8; background: #111626f0;
+             -webkit-backdrop-filter: blur(18px) saturate(1.4); backdrop-filter: blur(18px) saturate(1.4);
+             border: 1px solid #ffffff1f; box-shadow: 0 16px 40px #00000073, 0 0 0 1px #6a5cff33;
+             overflow-wrap: anywhere; animation: rise .22s ease-out; cursor: default; }
+        @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+      </style>
+      <div class="t"></div>`;
+    shadow.querySelector(".t").textContent = text;
+    el.addEventListener("click", () => el.remove());
+    document.documentElement.append(el);
+    toastEl = el;
+    setTimeout(() => el.remove(), text.startsWith("✗") ? 7000 : 4000);
+  }
+
   ext.runtime.onMessage.addListener((msg) => {
     if (msg?.kind === "media-changed" && !menu.hidden && view === "generic") genericMenu();
+    if (msg?.kind === "toast") toast(msg.text);
   });
 })();

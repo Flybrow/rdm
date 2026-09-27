@@ -1,6 +1,7 @@
 //! Presentation layer. `theme` (tokens, fonts) → `widgets` (atoms) → `chrome` (sidebar, header,
 //! dashboard), `card` (a download), `dialogs`, `toast` → `App`.
 
+mod browsers;
 mod card;
 mod chrome;
 mod dialogs;
@@ -352,6 +353,7 @@ enum Action {
     OpenSettings,
     CheckUpdates,
     InstallUpdate,
+    OpenBrowsers,
 }
 
 /// UI state that outlives a window (the tray reopens a fresh one): what the user typed and chose,
@@ -404,6 +406,8 @@ struct App<'a> {
     show_key: bool,
     /// The settings were opened to ask for the VirusTotal key.
     asking_key: bool,
+    /// The browser-extension window, while open.
+    browsers: Option<browsers::Browsers>,
     /// Download whose VirusTotal report is open.
     report: Option<DownloadId>,
     toasts: Toasts,
@@ -426,7 +430,7 @@ impl<'a> App<'a> {
         logo: TextureHandle,
         paced: bool,
     ) -> Self {
-        Self {
+        let mut app = Self {
             manager,
             shell,
             tray,
@@ -437,10 +441,27 @@ impl<'a> App<'a> {
             show_key: false,
             asking_key: false,
             report: None,
+            browsers: None,
             toasts: Toasts::default(),
             animating: false,
             paced,
             last_frame: None,
+        };
+        app.offer_extension();
+        app
+    }
+
+    /// First launch without the extension anywhere: the extension window opens by itself, once.
+    fn offer_extension(&mut self) {
+        if self.manager.with_settings(|s| s.extension_offered) {
+            return;
+        }
+        let mut settings = self.manager.settings();
+        settings.extension_offered = true;
+        self.manager.apply_settings(settings);
+        self.manager.save_settings();
+        if crate::extension::Browser::ALL.into_iter().all(|b| self.manager.browser_last_seen(b).is_none()) {
+            self.open_browsers();
         }
     }
 
@@ -531,6 +552,7 @@ impl<'a> App<'a> {
                     }
                 }
                 Action::OpenSettings => self.open_settings(),
+                Action::OpenBrowsers => self.open_browsers(),
                 Action::CheckUpdates => self.manager.check_updates(true),
                 Action::InstallUpdate => {
                     if !self.manager.install_update()
@@ -574,6 +596,7 @@ impl eframe::App for App<'_> {
             });
         self.settings_dialog(ctx);
         self.report_dialog(ctx, &mut actions);
+        self.browsers_dialog(ctx);
         self.firefox_prompt(ctx);
         self.apply(ctx, actions);
         let toasts = self.toasts.show(ctx);
@@ -633,7 +656,7 @@ fn open_file(path: PathBuf) {
 }
 
 /// Shows a file in the file manager. Linux: a D-Bus call (connection set-up included), off the UI thread.
-fn reveal_file(path: PathBuf) {
+pub(super) fn reveal_file(path: PathBuf) {
     #[cfg(windows)]
     let _ = opener::reveal(path);
     #[cfg(not(windows))]

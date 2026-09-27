@@ -100,6 +100,13 @@ impl Download {
         self.transition(allowed, Status::Queued, "Queued")
     }
 
+    /// Running → back in the queue after a transient failure (network down, busy server): the
+    /// scheduler retries it later. Recordings cannot: only the browser can feed them.
+    pub fn retry_later(&mut self) -> Result<(), DownloadError> {
+        let allowed = !self.is_recording() && self.status == Status::Running;
+        self.transition(allowed, Status::Queued, "Queued")
+    }
+
     pub fn category(&self) -> crate::Category {
         crate::Category::of(&self.target.to_string_lossy())
     }
@@ -160,6 +167,17 @@ mod tests {
         let d: Download = serde_json::from_str(json).unwrap();
         assert_eq!(d.status(), &Status::Paused);
         assert!(d.audio.is_none());
+    }
+
+    #[test]
+    fn transient_failures_go_back_to_the_queue() {
+        let mut d = sample();
+        assert!(d.retry_later().is_err(), "only a running download");
+        d.start().unwrap();
+        d.retry_later().unwrap();
+        assert_eq!(d.status(), &Status::Queued);
+        let mut r = Download::recording("https://www.youtube.com/watch?v=x".parse().unwrap(), "v.mp4".into());
+        assert!(r.retry_later().is_err());
     }
 
     #[test]

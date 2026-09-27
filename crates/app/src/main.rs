@@ -2,6 +2,7 @@
 
 mod autostart;
 mod bridge;
+mod extension;
 mod manager;
 mod notify;
 mod priority;
@@ -50,6 +51,8 @@ fn main() -> eframe::Result {
     };
 
     notify::register();
+    // Copies of the extension installed by an older RDM get this version's files.
+    std::thread::spawn(extension::refresh_installed);
     let manager = Manager::new(rt.handle().clone(), engine::client().expect("http client"));
     if let Some(url) = url_arg {
         manager.add(AddRequest::from_url(url));
