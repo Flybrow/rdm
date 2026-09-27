@@ -554,14 +554,17 @@ impl<'a> App<'a> {
                 Action::OpenSettings => self.open_settings(),
                 Action::OpenBrowsers => self.open_browsers(),
                 Action::CheckUpdates => self.manager.check_updates(true),
-                Action::InstallUpdate => {
-                    if !self.manager.install_update()
-                        && let crate::update::State::Available(release) = self.manager.update_state()
-                    {
-                        open_link(release.page);
-                    }
-                }
+                Action::InstallUpdate => self.install_update(),
             }
+        }
+    }
+
+    /// Installs the update on offer, or opens its page when RDM cannot install it itself.
+    fn install_update(&mut self) {
+        if !self.manager.install_update()
+            && let Some(release) = self.manager.update_state().release()
+        {
+            open_link(release.page.clone());
         }
     }
 

@@ -168,6 +168,28 @@ async fn rides_out_a_network_outage() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn respects_a_speed_limit_without_timeouts() {
+    let server = serve(Arc::new(Faults::default())).await;
+    let client = engine::client().unwrap();
+    let path = target("limit");
+    let mut job = Job::new(server.url, path.clone());
+    job.connections = 32;
+    job.limit.set(4 << 20); // 12 MiB at 4 MiB/s: about 3 s
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        engine::run(&client, &job, Arc::new(Progress::default()), CancellationToken::new()),
+    )
+    .await
+    .expect("download hung");
+    assert_eq!(result.unwrap(), Outcome::Completed);
+    let took = started.elapsed().as_secs_f64();
+    assert!((2.0..10.0).contains(&took), "took {took:.1} s");
+    assert!(server.peak.load(SeqCst) <= 16 + 1, "at most one connection per 256 KiB/s: peak {}", server.peak.load(SeqCst));
+    assert_intact(&path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn starts_with_few_connections() {
     let server = serve(Arc::new(Faults::default())).await;
     let (result, path) = download(server.url, target("start"), 64).await;

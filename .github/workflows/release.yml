@@ -74,7 +74,7 @@ jobs:
         run: |
           mkdir dist
           if [ "$RUNNER_OS" = Windows ]; then
-            cp RDM-*-x64.msi target/release/rdm.exe packaging/windows/install.ps1 dist/
+            cp RDM-*-x64-setup.msi target/release/rdm.exe packaging/windows/install.ps1 dist/
           else
             mkdir rdm-linux-x64
             cp target/release/rdm crates/app/assets/rdm.png rdm-linux-x64/ && cp -r packaging/linux/. rdm-linux-x64/

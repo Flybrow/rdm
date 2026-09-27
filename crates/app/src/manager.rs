@@ -102,7 +102,8 @@ pub struct Entry {
     last: u64,
     /// Automatic retries in a row without progress.
     retries: u32,
-    added: Instant,
+    /// When it was added in this session (`None`: loaded from disk).
+    added: Option<Instant>,
 }
 
 /// A download back in the queue after a transient failure (network down, busy server).
@@ -152,7 +153,7 @@ impl Entry {
             cancel: None,
             last: downloaded,
             retries: 0,
-            added: Instant::now(),
+            added: None,
         };
         entry.named();
         entry
@@ -761,7 +762,8 @@ impl Manager {
         self.repaint();
     }
 
-    /// At start (after a few seconds) and once a day, if enabled in the settings.
+    /// At start (after a few seconds) and once a day, if enabled in the settings; sooner when the
+    /// release was seen before its installer was attached.
     fn spawn_update_checks(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
         self.rt.spawn(async move {
@@ -772,7 +774,12 @@ impl Manager {
                     this.check_updates(false);
                 }
                 drop(this);
-                tokio::time::sleep(UPDATE_EVERY).await;
+                // The check runs in the background: give it time to land before looking at it.
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let incomplete = weak.upgrade().is_some_and(|this| {
+                    cfg!(windows) && this.update_state().release().is_some_and(|r| r.msi.is_none())
+                });
+                tokio::time::sleep(if incomplete { Duration::from_secs(15 * 60) } else { UPDATE_EVERY }).await;
             }
         });
     }
@@ -780,9 +787,9 @@ impl Manager {
     /// Asks GitHub for a newer release. `manual`: the user clicked, so "up to date" and errors show.
     pub fn check_updates(self: &Arc<Self>, manual: bool) {
         let current = self.update_state();
-        if matches!(current, update::State::Checking | update::State::Downloading(_))
-            || (!manual && matches!(current, update::State::Available(_)))
-        {
+        // A release first seen without its installer (published a minute before the Windows build
+        // finished uploading it) is looked at again.
+        if current.busy() || (!manual && current.release().is_some_and(|r| r.msi.is_some())) {
             return;
         }
         if manual {
@@ -801,25 +808,37 @@ impl Manager {
         });
     }
 
-    /// Windows: downloads and installs the new `.msi`, then quits (the installer restarts RDM).
-    /// `false` when there is no installer to run (the UI then opens the release page).
+    /// Windows: downloads and checks the new `.msi`, hands it to the installation assistant, then
+    /// quits (the assistant installs it and starts RDM again, see `update`). `false` when RDM
+    /// cannot install it itself (the UI then opens the release page).
     pub fn install_update(self: &Arc<Self>) -> bool {
-        let update::State::Available(release) = self.update_state() else { return false };
-        let Some(url) = release.msi.clone().filter(|_| cfg!(windows)) else { return false };
+        let Some(release) = self.update_state().release().cloned() else { return false };
+        let Some(installer) = release.msi.clone().filter(|_| update::can_self_install()) else { return false };
         self.set_update(update::State::Downloading(0.0));
         let this = self.clone();
         self.rt.spawn(async move {
-            let Some(client) = this.web() else { return };
+            // The update stays on offer: the card lets the user try again.
+            let fail = |reason: String| this.set_update(update::State::InstallFailed(release.clone(), reason));
+            let Some(client) = this.web() else {
+                return fail("client HTTP indisponible".into());
+            };
             let progress = {
                 let this = this.clone();
-                move |f: f32| *lock(&this.update) = update::State::Downloading(f)
+                move |f: f32| {
+                    *lock(&this.update) = update::State::Downloading(f);
+                    this.repaint();
+                }
             };
-            match update::download(&client, &url, progress).await {
-                Ok(msi) => match update::install_after_exit(&msi) {
-                    Ok(()) => this.request_quit(),
-                    Err(e) => this.set_update(update::State::Failed(format!("installation impossible : {e}"))),
-                },
-                Err(reason) => this.set_update(update::State::Failed(reason)),
+            let msi = match update::download(&client, &release.version, &installer, progress).await {
+                Ok(msi) => msi,
+                Err(reason) => return fail(reason),
+            };
+            match update::start_installation(&msi) {
+                Ok(()) => {
+                    this.set_update(update::State::Installing);
+                    this.request_quit();
+                }
+                Err(e) => fail(format!("impossible de lancer l'installation : {e}")),
             }
         });
         true
@@ -894,7 +913,9 @@ impl Manager {
         let target = unique_path(&settings.target_dir(&name), &name, &entries, None);
         let download = Download::recording(page, target.clone());
         let id = download.id;
-        entries.push(Entry::new(download, Vec::new(), 0, 0));
+        let mut entry = Entry::new(download, Vec::new(), 0, 0);
+        entry.added = Some(Instant::now());
+        entries.push(entry);
         drop(entries);
         let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
         let recording = Recording { id, target, parts: HashMap::new(), last_data: Instant::now() };
@@ -1109,7 +1130,7 @@ impl Manager {
     fn insert(&self, url: Url, audio: Option<Url>, name: &str, headers: Vec<(String, String)>, resolving: bool) -> Option<DownloadId> {
         let settings = self.settings();
         let mut entries = lock(&self.entries);
-        let twice = entries.iter().rev().take_while(|e| e.added.elapsed() < DUPLICATE_WINDOW).any(|e| {
+        let twice = entries.iter().rev().take_while(|e| e.added.is_some_and(|t| t.elapsed() < DUPLICATE_WINDOW)).any(|e| {
             e.download.url == url && e.download.audio == audio && !matches!(e.download.status(), Status::Failed(_))
         });
         if twice {
@@ -1121,6 +1142,7 @@ impl Manager {
         let id = download.id;
         let mut entry = Entry::new(download, headers, 0, 0);
         entry.resolving = resolving;
+        entry.added = Some(Instant::now());
         entries.push(entry);
         drop(entries);
         self.changed();

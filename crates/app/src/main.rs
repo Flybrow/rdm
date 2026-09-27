@@ -22,8 +22,15 @@ use url::Url;
 /// Background work still running once everything is saved (a SHA-256 of a huge file, a merge past
 /// its grace period) must not keep the process alive after the user quit.
 const RUNTIME_GRACE: Duration = Duration::from_millis(500);
+/// `rdm --quit`: closes the running RDM (downloads saved), if any, and starts nothing.
+const QUIT_FLAG: &str = "--quit";
 
 fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // A copy of RDM started to install an update once RDM has quit (see `update`).
+    if update::run_assistant(&args) {
+        return Ok(());
+    }
     priority::full_speed_in_background();
     // Transfers are I/O-bound: a few workers drive 64 connections; fewer threads, less memory.
     let workers = std::thread::available_parallelism().map_or(2, |n| n.get().clamp(2, 4));
@@ -35,7 +42,11 @@ fn main() -> eframe::Result {
         .build()
         .expect("tokio runtime");
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // The installer closes a running RDM cleanly before replacing it.
+    if args.iter().any(|a| a == QUIT_FLAG) {
+        rt.block_on(bridge::quit_running());
+        return Ok(());
+    }
     let minimized = args.iter().any(|a| a == autostart::MINIMIZED_FLAG);
     let url_arg = args
         .iter()
@@ -44,15 +55,14 @@ fn main() -> eframe::Result {
 
     // The bridge port doubles as a single-instance lock: a second launch hands over its URL, or
     // just brings the running window to the front.
-    let Ok(listener) = rt.block_on(bridge::bind()) else {
-        window::allow_foreground_handoff();
-        rt.block_on(bridge::forward(url_arg));
+    let Some(listener) = rt.block_on(single_instance(url_arg.as_ref())) else {
         return Ok(());
     };
 
     notify::register();
     // Copies of the extension installed by an older RDM get this version's files.
     std::thread::spawn(extension::refresh_installed);
+    std::thread::spawn(update::clean_leftovers);
     let manager = Manager::new(rt.handle().clone(), engine::client().expect("http client"));
     if let Some(url) = url_arg {
         manager.add(AddRequest::from_url(url));
@@ -63,6 +73,39 @@ fn main() -> eframe::Result {
     let result = ui::run(manager, minimized); // returns once the manager has shut down
     rt.shutdown_timeout(RUNTIME_GRACE);
     result
+}
+
+/// The bridge's listener if this is the only RDM; `None` once the running one took over (`url`
+/// handed to it, or its window shown). An RDM still closing (a restart, an update) frees the
+/// port within seconds: it is waited for. Never ends silently: if the port stays taken by
+/// something that does not answer as RDM, the user is told.
+async fn single_instance(url: Option<&Url>) -> Option<tokio::net::TcpListener> {
+    // Asked once at once, once more at the end: a hung process would make each try wait.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut asked = false;
+    loop {
+        if let Ok(listener) = bridge::bind().await {
+            return Some(listener);
+        }
+        let last = tokio::time::Instant::now() >= deadline;
+        if !asked || last {
+            window::allow_foreground_handoff();
+            if bridge::forward(url).await {
+                return None;
+            }
+            asked = true;
+        }
+        if last {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    notify::fatal(&format!(
+        "RDM ne peut pas démarrer : le port local 127.0.0.1:{} est occupé par un programme qui ne répond pas \
+         (un RDM bloqué ?). Fermez-le (Gestionnaire des tâches), puis relancez RDM.",
+        settings::BRIDGE_PORT
+    ));
+    None
 }
 
 /// Closing the session (SIGTERM), Ctrl+C in a terminal or a closed terminal: quit as if from the

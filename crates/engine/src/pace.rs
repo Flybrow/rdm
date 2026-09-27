@@ -68,8 +68,9 @@ impl Pace {
         }
     }
 
-    /// Called once per second: raises the limit if the connections have been healthy.
-    pub fn ramp(&self) -> usize {
+    /// Called once per second: raises the limit if the connections have been healthy, never above
+    /// `cap` (see [`speed_cap`]).
+    pub fn ramp(&self, cap: usize) -> usize {
         let trouble = self.last_trouble.load(Relaxed);
         let limit = self.limit.load(Relaxed);
         let next = if trouble == 0 {
@@ -79,12 +80,17 @@ impl Pace {
         } else {
             limit
         }
-        .clamp(1, self.max);
+        .clamp(1, self.max.min(cap).max(1));
         self.limit.store(next, Relaxed);
         next
     }
 
-    /// Bytes reached the disk.
+    /// Lowers the limit to `cap` right away (a speed limit was set).
+    pub fn cap(&self, cap: usize) {
+        self.limit.fetch_min(cap.max(1), Relaxed);
+    }
+
+    /// Bytes arrived.
     pub fn progressed(&self) {
         self.last_progress.store(self.now(), Relaxed);
     }
@@ -93,6 +99,13 @@ impl Pace {
     pub fn stalled(&self) -> bool {
         self.now().saturating_sub(self.last_progress.load(Relaxed)) > millis(STALL_LIMIT)
     }
+}
+
+/// Under a speed limit (bytes per second, 0 = none), more connections only share the same bytes
+/// and wait longer for their turn — long enough, with many of them, for the server to time them
+/// out: one connection per 256 KiB/s allowed.
+pub(crate) fn speed_cap(limit: u64) -> usize {
+    if limit == 0 { usize::MAX } else { usize::try_from(limit / (256 << 10)).unwrap_or(usize::MAX).max(1) }
 }
 
 fn millis(d: Duration) -> u64 {
@@ -107,21 +120,21 @@ mod tests {
     fn starts_small_and_doubles_while_healthy() {
         let pace = Pace::new(32);
         assert_eq!(pace.limit(), INITIAL_CONNECTIONS);
-        assert_eq!(pace.ramp(), 16);
-        assert_eq!(pace.ramp(), 32);
-        assert_eq!(pace.ramp(), 32, "never above the configured maximum");
+        assert_eq!(pace.ramp(usize::MAX), 16);
+        assert_eq!(pace.ramp(usize::MAX), 32);
+        assert_eq!(pace.ramp(usize::MAX), 32, "never above the configured maximum");
         assert_eq!(Pace::new(3).limit(), 3);
     }
 
     #[test]
     fn backs_off_on_trouble_and_holds_during_cooldown() {
         let pace = Pace::new(32);
-        pace.ramp();
+        pace.ramp(usize::MAX);
         pace.trouble(16, false);
         assert_eq!(pace.limit(), 12, "a quarter fewer");
         pace.trouble(12, false);
         assert_eq!(pace.limit(), 12, "a burst of failures is one event");
-        assert_eq!(pace.ramp(), 12, "no new connection right after trouble");
+        assert_eq!(pace.ramp(usize::MAX), 12, "no new connection right after trouble");
     }
 
     #[test]
@@ -132,6 +145,18 @@ mod tests {
         let single = Pace::new(1);
         single.trouble(1, true);
         assert_eq!(single.limit(), 1);
+    }
+
+    #[test]
+    fn a_speed_limit_caps_connections() {
+        assert_eq!(speed_cap(0), usize::MAX);
+        assert_eq!(speed_cap(10 << 10), 1, "10 KiB/s: one connection");
+        assert_eq!(speed_cap(1 << 20), 4);
+        let pace = Pace::new(32);
+        pace.cap(speed_cap(512 << 10));
+        assert_eq!(pace.limit(), 2);
+        assert_eq!(pace.ramp(speed_cap(512 << 10)), 2);
+        assert_eq!(pace.ramp(usize::MAX), 4, "limit lifted: growing again");
     }
 
     #[test]

@@ -58,6 +58,24 @@ pub fn virustotal(file_name: &str, verdict: Result<&Report, String>) {
     show(&summary, &body);
 }
 
+/// RDM cannot run: said in a message box (Windows) or a notification (Linux), waited for — the
+/// process ends right after.
+pub fn fatal(text: &str) {
+    eprintln!("RDM: {text}");
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MessageBoxW};
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        let (text, title) = (wide(text), wide("RDM"));
+        // SAFETY: NUL-terminated UTF-16 strings that outlive the call; no owner window.
+        unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR | MB_SETFOREGROUND) };
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = notify_rust::Notification::new().appname("RDM").summary("RDM").body(&escape_markup(text)).icon("rdm").show();
+    }
+}
+
 /// Fire-and-forget: showing a notification may block on D-Bus or WinRT for a moment.
 fn show(summary: &str, body: &str) {
     // Linux notification servers may interpret the body as markup.

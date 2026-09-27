@@ -20,7 +20,7 @@ use url::Url;
 
 use crate::{
     EngineError, Job, Outcome, Progress, RateLimit,
-    pace::Pace,
+    pace::{Pace, speed_cap},
     probe,
     slots::{MIN_SPLIT, Slot, Slots},
     state_path,
@@ -68,6 +68,7 @@ pub(crate) async fn run(
     }
     let state = state_path(&job.target);
     let pace = Pace::new(usize::from(job.connections));
+    pace.cap(speed_cap(job.limit.get()));
 
     // An empty body is how expired/blocked media links (e.g. YouTube) answer: never report it as done.
     if info.size == Some(0) {
@@ -133,7 +134,7 @@ pub(crate) async fn run(
             }
             // More connections while they help: waiting pieces first, then halves of the largest.
             _ = ramp.tick(), if info.ranges && failure.is_none() && !ctx.stop.is_cancelled() => {
-                let limit = ctx.pace.ramp();
+                let limit = ctx.pace.ramp(speed_cap(ctx.limit.get()));
                 while ctx.progress.active.load(Acquire) < limit {
                     let Some(slot) = ctx.slots.steal() else { break };
                     spawn(&mut workers, &ctx, slot);
@@ -294,6 +295,7 @@ async fn fetch(ctx: &Ctx, slot: &Slot) -> Result<(), EngineError> {
         let n = min(chunk.len() as u64, room) as usize;
         buf.extend_from_slice(&chunk[..n]);
         ctx.progress.downloaded.fetch_add(n as u64, Relaxed);
+        ctx.pace.progressed(); // something arrived: the connection is alive, however slow
         // Throttling sleeps can be long: they must not delay a pause/shutdown.
         if ctx.limit.get() > 0 {
             tokio::select! {
@@ -307,12 +309,10 @@ async fn fetch(ctx: &Ctx, slot: &Slot) -> Result<(), EngineError> {
         }
         if buf.len() >= BUF {
             flush(&mut file, &mut buf, slot).await?;
-            ctx.pace.progressed();
         }
     };
     if !buf.is_empty() {
         flush(&mut file, &mut buf, slot).await?;
-        ctx.pace.progressed();
     }
     file.flush().await?;
 

@@ -15,9 +15,20 @@ hicolor="$data/icons/hicolor"
 
 deps=1
 autostart=0
+
+# The user's Desktop folder (localized: "Bureau"…), empty when there is none.
+desktop_folder() {
+    dir=$(command -v xdg-user-dir >/dev/null && xdg-user-dir DESKTOP 2>/dev/null || true)
+    [ -n "$dir" ] && [ "$dir" != "$HOME" ] || dir="$HOME/Desktop"
+    [ -d "$dir" ] && printf '%s' "$dir"
+    return 0
+}
+
 for arg in "$@"; do
     case "$arg" in
         --uninstall)
+            dir=$(desktop_folder)
+            [ -z "$dir" ] || rm -f "$dir/rdm.desktop"
             rm -f "$bin/rdm" "$apps/rdm.desktop" "$config/autostart/rdm.desktop"
             find "$hicolor" -path '*/apps/rdm.*' -delete 2>/dev/null || true
             command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t "$hicolor" 2>/dev/null || true
@@ -178,6 +189,13 @@ fi
 }
 
 # ── Install (per user) ───────────────────────────────────────────────────
+# A running RDM is closed cleanly first (downloads saved), by the new binary — an older one would
+# not know the option — and started again afterwards, in its new version.
+was_running=0
+if command -v pgrep >/dev/null && pgrep -x rdm >/dev/null 2>&1; then
+    was_running=1
+    "$exe" --quit >/dev/null 2>&1 || true
+fi
 mkdir -p "$bin" "$apps"
 install -m 755 "$exe" "$bin/rdm"
 # Absolute Exec: ~/.local/bin is not on the desktop session's PATH everywhere.
@@ -195,6 +213,15 @@ else
 fi
 command -v update-desktop-database >/dev/null && update-desktop-database "$apps" 2>/dev/null || true
 command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t -f "$hicolor" 2>/dev/null || true
+
+# ── Desktop shortcut, where the desktop shows icons (a Desktop folder exists) ─
+desktop_dir=$(desktop_folder)
+if [ -n "$desktop_dir" ] && [ -d "$desktop_dir" ]; then
+    install -m 755 "$apps/rdm.desktop" "$desktop_dir/rdm.desktop"
+    # GNOME (Desktop Icons NG) launches only entries marked trusted.
+    command -v gio >/dev/null && gio set "$desktop_dir/rdm.desktop" metadata::trusted true 2>/dev/null || true
+    say "Desktop shortcut: $desktop_dir/rdm.desktop"
+fi
 
 # ── Start at login (same entry and flag as the app's own setting) ───────────
 if [ "$autostart" -eq 1 ]; then
@@ -247,5 +274,14 @@ case ":$PATH:" in
     *) warn "$bin is not in your PATH (the menu entry works anyway)" ;;
 esac
 
+if [ "$was_running" -eq 1 ]; then
+    if pgrep -x rdm >/dev/null 2>&1; then
+        warn "the previous RDM is still running (too old to close on request): quit it (tray icon → Quitter) and start it again"
+    else
+        say "Starting the new RDM"
+        nohup "$bin/rdm" >/dev/null 2>&1 &
+    fi
+fi
+
 say "RDM installed to $bin/rdm"
-echo "    Browser extension (Chrome, Brave, Firefox): see README, section « Extension »."
+echo "    Browser extension (Firefox, Chrome, Brave, Opera, Edge): in RDM, card « Extension navigateur »."

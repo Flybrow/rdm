@@ -1,4 +1,4 @@
-﻿# Builds RDM-<version>-x64.msi (per-user installer) at the repository root.
+﻿# Builds RDM-<version>-x64-setup.msi (per-user installer) at the repository root.
 #   powershell -ExecutionPolicy Bypass -File packaging\windows\build-msi.ps1 [-NoBuild]
 # Needs WiX 3 (candle.exe / light.exe): on PATH, in "WiX Toolset v3.x", or %LOCALAPPDATA%\Programs\wix3.
 param([switch]$NoBuild)
@@ -21,11 +21,11 @@ if (-not $NoBuild) { cargo build --release -p rdm; if ($LASTEXITCODE) { throw 'c
 
 $obj = Join-Path $root 'target\wix'
 New-Item -ItemType Directory -Force $obj | Out-Null
-$out = Join-Path $root "RDM-$version-x64.msi"
-& "$bin\candle.exe" -nologo -arch x64 -out "$obj\rdm.wixobj" `
+$out = Join-Path $root "RDM-$version-x64-setup.msi"
+& "$bin\candle.exe" -nologo -arch x64 -ext WixUtilExtension -out "$obj\rdm.wixobj" `
     "-dVersion=$version" "-dRepository=$repository" "-dExe=$root\target\release\rdm.exe" "-dAssets=$root\crates\app\assets" `
     packaging\windows\rdm.wxs
 if ($LASTEXITCODE) { throw 'candle a échoué' }
-& "$bin\light.exe" -nologo -sice:ICE91 -cultures:fr-FR -out $out "$obj\rdm.wixobj"
+& "$bin\light.exe" -nologo -ext WixUtilExtension -sice:ICE91 -cultures:fr-FR -out $out "$obj\rdm.wixobj"
 if ($LASTEXITCODE) { throw 'light a échoué' }
 Write-Output "MSI : $out"

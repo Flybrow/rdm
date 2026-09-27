@@ -102,16 +102,10 @@ impl App<'_> {
                 self.open_browsers();
             }
             Some(Action::CheckUpdates) => self.manager.check_updates(true),
-            Some(Action::InstallUpdate) => {
-                if !self.manager.install_update()
-                    && let update::State::Available(release) = self.manager.update_state()
-                {
-                    open_link(release.page);
-                }
-            }
+            Some(Action::InstallUpdate) => self.install_update(),
             _ => {}
         }
-        if matches!(self.manager.update_state(), update::State::Checking | update::State::Downloading(_)) {
+        if self.manager.update_state().busy() {
             self.animating = true;
         }
         self.show_key = show_key;
@@ -314,8 +308,7 @@ fn settings_form(
         toggle(ui, &mut s.check_updates, "Rechercher automatiquement", "Au démarrage puis une fois par jour, sur GitHub (une seule requête)");
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            let busy = matches!(update_state, update::State::Checking | update::State::Downloading(_));
-            if ui.add_enabled_ui(!busy, |ui| ghost_button(ui, icon::ARROWS_CLOCKWISE, "Rechercher maintenant")).inner.clicked() {
+            if ui.add_enabled_ui(!update_state.busy(), |ui| ghost_button(ui, icon::ARROWS_CLOCKWISE, "Rechercher maintenant")).inner.clicked() {
                 action = Some(Action::CheckUpdates);
             }
             let (glyph, text, color) = match update_state {
@@ -324,13 +317,20 @@ fn settings_form(
                 update::State::UpToDate => (icon::CHECK_CIRCLE, format!("RDM est à jour ({})", env!("CARGO_PKG_VERSION")), p.success),
                 update::State::Available(r) => (icon::ROCKET_LAUNCH, format!("Version {} disponible", r.version), p.accent),
                 update::State::Downloading(f) => (icon::DOWNLOAD_SIMPLE, format!("Téléchargement {} %", (f * 100.0) as u32), p.accent),
+                update::State::Installing => (icon::ROCKET_LAUNCH, "Installation : RDM redémarre tout seul".to_owned(), p.accent),
+                update::State::InstallFailed(r, reason) => (icon::WARNING, format!("Version {} : {reason}", r.version), p.danger),
                 update::State::Failed(reason) => (icon::WARNING, reason.clone(), p.danger),
             };
-            widgets::icon_text(ui, glyph, color, &text, p.muted, 13.0);
+            ui.add(Label::new(RichText::new(format!("{glyph}  {text}")).font(theme::regular(13.0)).color(color)).wrap());
         });
-        if let update::State::Available(r) = update_state {
+        if let Some(r) = update_state.release() {
             ui.add_space(6.0);
-            let label = if r.msi.is_some() && cfg!(windows) { "Installer la mise à jour" } else { "Voir la nouvelle version" };
+            let installs = r.msi.is_some() && update::can_self_install();
+            let label = match (installs, update_state) {
+                (true, update::State::InstallFailed(..)) => "Réessayer l'installation",
+                (true, _) => "Installer la mise à jour",
+                (false, _) => "Voir la nouvelle version",
+            };
             if accent_button(ui, icon::ROCKET_LAUNCH, label).clicked() {
                 action = Some(Action::InstallUpdate);
             }

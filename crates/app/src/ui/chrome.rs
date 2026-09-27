@@ -90,9 +90,22 @@ impl App<'_> {
 
     /// A newer release is out (or being downloaded): brand-gradient card with one button.
     fn update_card(&mut self, ui: &mut Ui, p: &Palette) -> Option<Action> {
-        let (version, downloading) = match self.manager.update_state() {
-            update::State::Available(r) => (r.version, None),
-            update::State::Downloading(f) => (String::new(), Some(f)),
+        let installs = |r: &update::Release| r.msi.is_some() && update::can_self_install();
+        // (title, detail, clickable, moving, tooltip)
+        let (title, detail, clickable, moving, tip) = match self.manager.update_state() {
+            update::State::Available(r) => {
+                let detail = if installs(&r) { "Cliquer pour installer" } else { "Voir la nouvelle version" };
+                (format!("Version {} disponible", r.version), detail.to_owned(), true, false, None)
+            }
+            update::State::Downloading(f) => ("Mise à jour…".to_owned(), format!("téléchargement {} %", (f * 100.0) as u32), false, true, None),
+            update::State::Installing => ("Installation…".to_owned(), "RDM redémarre tout seul".to_owned(), false, true, None),
+            update::State::InstallFailed(r, reason) => (
+                format!("Version {} : échec", r.version),
+                "Cliquer pour réessayer".to_owned(),
+                true,
+                false,
+                Some(reason),
+            ),
             _ => return None,
         };
         let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 72.0), Sense::click());
@@ -103,16 +116,16 @@ impl App<'_> {
         let lift = |c: Color32| c.lerp_to_gamma(Color32::WHITE, 0.08 * hover);
         painter.add(widgets::gradient(ui, rect, 14, lift(p.accent), lift(p.accent2), vec2(0.9, 0.4)));
         painter.text(pos2(rect.left() + 16.0, rect.top() + 22.0), Align2::LEFT_CENTER, icon::ROCKET_LAUNCH, theme::regular(18.0), Color32::WHITE);
-        let (title, detail) = match downloading {
-            Some(f) => ("Mise à jour…".to_owned(), format!("téléchargement {} %", (f * 100.0) as u32)),
-            None => (format!("Version {version} disponible"), if cfg!(windows) { "Cliquer pour installer".to_owned() } else { "Voir la nouvelle version".to_owned() }),
-        };
         painter.text(pos2(rect.left() + 42.0, rect.top() + 22.0), Align2::LEFT_CENTER, title, theme::semibold(13.5), Color32::WHITE);
         painter.text(pos2(rect.left() + 42.0, rect.top() + 46.0), Align2::LEFT_CENTER, detail, theme::regular(12.0), Color32::from_white_alpha(210));
-        if downloading.is_some() {
+        if moving {
             self.animating = true;
         }
-        (response.clicked() && downloading.is_none()).then_some(Action::InstallUpdate)
+        let response = match tip {
+            Some(reason) => response.on_hover_text(reason),
+            None => response,
+        };
+        (response.clicked() && clickable).then_some(Action::InstallUpdate)
     }
 
     /// Current speed limit; opens the settings.

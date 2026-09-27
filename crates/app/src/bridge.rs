@@ -50,6 +50,7 @@ pub async fn serve(manager: Arc<Manager>, listener: TcpListener) {
         .route("/probe", post(probe))
         .route("/check", post(check))
         .route("/show", post(show))
+        .route("/quit", post(quit))
         .route("/record/start", post(record_start))
         .route("/record/{token}/progress", post(record_progress))
         .route("/record/{token}/finish", post(record_finish))
@@ -275,6 +276,20 @@ async fn record_cancel(State(manager): State<Arc<Manager>>, headers: HeaderMap, 
     if manager.cancel_recording(&token, "enregistrement annulé") { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
 }
 
+/// `rdm --quit` (the installer, before replacing files): quit as from the tray's "Quitter". Local
+/// programs only: browsers always send `Origin` with a POST, so neither a web page nor an
+/// extension can close RDM.
+async fn quit(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> StatusCode {
+    if headers.contains_key(ORIGIN) {
+        return StatusCode::FORBIDDEN;
+    }
+    if let Err(status) = guard(&manager, &headers) {
+        return status;
+    }
+    manager.request_quit();
+    StatusCode::ACCEPTED
+}
+
 async fn show(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> StatusCode {
     // The extension's toolbar button: an explicit request, so a put-off approval question returns.
     manager.firefox_wake();
@@ -286,8 +301,30 @@ async fn show(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> Status
 }
 
 /// Second launch: hand the URL (or just "show yourself") to the running instance.
-pub async fn forward(url: Option<Url>) {
+/// `rdm --quit`: asks a running RDM to quit and waits (bounded) until it is gone. Starts nothing.
+pub async fn quit_running() {
     let Ok(client) = engine::client() else { return };
+    let asked = client
+        .post(format!("http://127.0.0.1:{BRIDGE_PORT}/quit"))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success());
+    if !asked {
+        return;
+    }
+    // The port is let go when the process ends (downloads saved first).
+    for _ in 0..80 {
+        if bind().await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// `true` when a running RDM took the request.
+pub async fn forward(url: Option<&Url>) -> bool {
+    let Ok(client) = engine::client() else { return false };
     let base = format!("http://127.0.0.1:{BRIDGE_PORT}");
     let request = match url {
         Some(url) => client
@@ -296,7 +333,7 @@ pub async fn forward(url: Option<Url>) {
             .body(serde_json::json!({ "url": url }).to_string()),
         None => client.post(format!("{base}/show")),
     };
-    let _ = request.timeout(Duration::from_secs(5)).send().await;
+    request.timeout(Duration::from_secs(5)).send().await.is_ok_and(|r| r.status().is_success())
 }
 
 #[cfg(test)]

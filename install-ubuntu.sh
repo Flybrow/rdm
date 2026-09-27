@@ -59,12 +59,12 @@ say "Compilation de RDM (quelques minutes la première fois)"
 say "Installation : applications GNOME, icône, démarrage automatique"
 sh packaging/linux/install.sh --autostart
 
-if pgrep -x rdm >/dev/null 2>&1; then
-    warn "RDM était déjà ouvert : quittez-le (icône de RDM → Quitter) puis relancez-le pour utiliser la nouvelle version."
-else
+# Un RDM déjà ouvert a été fermé proprement puis relancé par install.sh (ou signalé s'il est
+# trop ancien pour se fermer sur demande).
+if ! pgrep -x rdm >/dev/null 2>&1; then
     say "Démarrage de RDM"
     nohup "$HOME/.local/bin/rdm" >/dev/null 2>&1 &
 fi
 echo
-echo "RDM est installé : cherchez « RDM » dans les applications (touche Super)."
-echo "Extension du navigateur : voir README.md, section « Extension »."
+echo "RDM est installé : cherchez « RDM » dans les applications (touche Super), ou l'icône du Bureau."
+echo "Extension du navigateur : dans RDM, carte « Extension navigateur » (Firefox, Chrome, Brave, Opera, Edge)."

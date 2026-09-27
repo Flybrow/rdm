@@ -25,7 +25,7 @@
 
 | Système | Fichier | Installation |
 |---|---|---|
-| **Windows 10 / 11** | [`RDM-x.y.z-x64.msi`](https://github.com/vincentxjoubert-lang/rdm/releases/latest) | Double-clic. Installé pour votre compte (sans droits administrateur), menu Démarrer. Les mises à jour suivantes s'installent depuis RDM. |
+| **Windows 10 / 11** | [`RDM-x.y.z-x64-setup.msi`](https://github.com/vincentxjoubert-lang/rdm/releases/latest) | Double-clic. Installé pour votre compte (sans droits administrateur), menu Démarrer et **Bureau**. Un RDM ouvert est fermé proprement puis relancé. Les mises à jour suivantes s'installent depuis RDM. |
 | **Ubuntu 26.04** | code source | `sh install-ubuntu.sh` (voir [Installation](#installation)) : icône dans les applications GNOME, démarrage automatique. |
 | **Debian / Ubuntu** | [`rdm_*.deb`](https://github.com/vincentxjoubert-lang/rdm/releases/latest) | `sudo apt install ./rdm_*.deb` |
 | **Fedora / openSUSE** | [`rdm-*.rpm`](https://github.com/vincentxjoubert-lang/rdm/releases/latest) | `sudo dnf install ./rdm-*.rpm` |
@@ -47,8 +47,10 @@
 
 RDM cherche une nouvelle version sur ce dépôt au démarrage puis une fois par jour : une seule requête à l'API de GitHub, rien d'autre (désactivable dans **Paramètres → Mises à jour**, où un bouton « Rechercher maintenant » permet aussi de vérifier à la demande). Quand une version sort, une carte apparaît dans la barre latérale :
 
-- **Windows** : un clic télécharge le `.msi` depuis GitHub, l'installe (sans demande d'administrateur) puis relance RDM. Les téléchargements en cours sont mis en pause proprement et reprennent ensuite.
+- **Windows** : un clic télécharge l'installateur depuis GitHub (avec reprises si la connexion coupe), le vérifie (taille et empreinte SHA-256 publiées par GitHub, format MSI), puis RDM se ferme et un assistant — une copie de RDM, sans PowerShell — attend sa fermeture réelle, installe (barre de progression, sans demande d'administrateur, journal `rdm-update-<version>.log` dans le dossier temporaire) et relance RDM. Si l'installation échoue, l'assistant le dit, propose de réessayer et relance l'ancienne version : RDM n'est jamais laissé fermé sans explication. Les téléchargements en cours sont mis en pause proprement et reprennent ensuite. Si le téléchargement de l'installateur échoue, la carte reste là pour réessayer.
 - **Linux** : un clic ouvre la page de la version.
+
+> **RDM 0.1.0 et 0.2.0** : leur installation automatique était défectueuse (RDM se fermait sans rien installer). Depuis la 0.2.1, ces versions ouvrent la page de la nouvelle version au lieu de se fermer : téléchargez `RDM-x.y.z-x64-setup.msi` et double-cliquez, **une seule fois** — l'installateur ferme RDM lui-même. Les mises à jour suivantes se font de nouveau en un clic.
 
 ## Architecture (DDD, couches)
 
@@ -161,7 +163,7 @@ Dépendances de compilation sous Linux : un compilateur C et `pkg-config` (`sudo
 sh install-ubuntu.sh
 ```
 
-Le script installe les outils de compilation et, si besoin, Rust (rustup), compile RDM, l'installe pour votre compte avec son icône dans les **applications GNOME** (touche Super → « RDM »), le **lance à chaque ouverture de session** (réduit dans la zone de notification) et le démarre. `sudo` ne sert qu'aux paquets système manquants. Désinstaller : `sh install-ubuntu.sh --uninstall` (les réglages sont conservés).
+Le script installe les outils de compilation et, si besoin, Rust (rustup), compile RDM, l'installe pour votre compte avec son icône dans les **applications GNOME** (touche Super → « RDM ») et sur le **Bureau** (quand il affiche des icônes), le **lance à chaque ouverture de session** (réduit dans la zone de notification) et le démarre. `sudo` ne sert qu'aux paquets système manquants. Désinstaller : `sh install-ubuntu.sh --uninstall` (les réglages sont conservés).
 
 | Système | Installer | Désinstaller |
 |---------|-----------|--------------|
