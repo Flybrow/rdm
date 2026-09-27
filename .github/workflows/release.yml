@@ -1,0 +1,95 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: rdm-windows
+          - os: ubuntu-latest
+            artifact: rdm-linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo build --release -p rdm
+
+      - name: Extension checks (syntax + unit tests)
+        if: runner.os == 'Linux'
+        run: sh extension/test/check.sh
+
+      - name: Firefox extension build + lint
+        if: runner.os == 'Linux'
+        run: |
+          sh packaging/firefox/build.sh
+          npx --yes web-ext lint --source-dir target/firefox
+
+      - name: Dependency audit (RustSec)
+        if: runner.os == 'Linux'
+        run: cargo install cargo-audit --locked && cargo audit
+
+      - name: Debian package
+        if: runner.os == 'Linux'
+        run: cargo install cargo-deb --locked && cargo deb -p rdm --no-build
+
+      - name: Fedora package
+        if: runner.os == 'Linux'
+        run: cargo install cargo-generate-rpm --locked && cargo generate-rpm -p crates/app
+
+      - name: Windows installer (WiX 3)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\wix.zip"
+          Invoke-WebRequest https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip -OutFile $zip
+          Expand-Archive $zip "$env:LOCALAPPDATA\Programs\wix3"
+          powershell -ExecutionPolicy Bypass -File packaging/windows/build-msi.ps1 -NoBuild
+
+      - name: Stage
+        shell: bash
+        run: |
+          mkdir dist
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp RDM-*-x64.msi target/release/rdm.exe packaging/windows/install.ps1 dist/
+          else
+            mkdir rdm-linux-x64
+            cp target/release/rdm crates/app/assets/rdm.png rdm-linux-x64/ && cp -r packaging/linux/. rdm-linux-x64/
+            tar -czf dist/rdm-linux-x64.tar.gz rdm-linux-x64
+            cp target/debian/*.deb target/generate-rpm/*.rpm dist/
+            (cd target/firefox && zip -qr ../../dist/rdm-firefox.xpi .)
+            (cd extension && zip -qr ../dist/rdm-chrome-extension.zip . -x 'test/*')
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist
+
+      - name: Attach to the GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.msi
+            dist/*.deb
+            dist/*.rpm
+            dist/*.tar.gz
+            dist/*.xpi
+            dist/*.zip

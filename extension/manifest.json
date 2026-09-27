@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "RDM — Rust Download Manager",
+  "version": "0.2.0",
+  "description": "Envoie les téléchargements et les vidéos détectées vers RDM.",
+  "minimum_chrome_version": "121",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "rdm@rdm-download-manager",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": { "required": ["none"] }
+    }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoi3hDM75DEXRcYzkd9FIEynsz1KfiIX5fzR5xb0Dx1HLZjfqyFiR9FCAgkG+ycP5i4ZG0PC2twxSVO0nJbzz+UYpYmAxoRDMLqkiYfj9ufu3cXxkG4RWwpxm5SEnzhlrzPWuqPg1na86NOu7NZIKyk2q1C98u3aoInyREJcbBrfPHxIguhjhRSgt/UcJRORnCmcNrE034XPJbZ3GhQRgXqOZxld1gArW8Y7D+/sRUVyji87B8StuR1WWzvqLPiSsUGb0zcpK3optPyRbzxVUbLNFz6kprKfUDyqBSBd2+cmbyZp/xfAwZGGYpMJTiUvuMneCY/q4l8TEAZlc3V8pHwIDAQAB",
+  "permissions": ["downloads", "cookies", "webRequest", "contextMenus", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*", "https://www.youtube-nocookie.com/*"],
+      "js": ["youtube.js"],
+      "world": "MAIN",
+      "all_frames": true,
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.youtube.com/watch*", "https://m.youtube.com/watch*"],
+      "js": ["capture.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["relay.html", "relay.js"],
+      "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*"]
+    }
+  ],
+  "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "action": { "default_title": "RDM", "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png" } }
+}

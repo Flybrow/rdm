@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- 16–32 px variant: full-bleed tile and heavier strokes, so the arrow survives downscaling. -->
+  <defs>
+    <linearGradient id="bg" x1="40" y1="16" x2="472" y2="496" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3D8BFF"/>
+      <stop offset="0.5" stop-color="#6A5CFF"/>
+      <stop offset="1" stop-color="#B24CFF"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="496" height="496" rx="120" fill="url(#bg)"/>
+  <path fill="#FFFFFF" d="M216 72h80a22 22 0 0 1 22 22v124h62a16 16 0 0 1 11.6 27l-123.9 131a16 16 0 0 1-23.3 0L120.5 245A16 16 0 0 1 132 218h62V94a22 22 0 0 1 22-22z"/>
+  <path fill="none" stroke="#FFFFFF" stroke-width="58" stroke-linecap="round" stroke-linejoin="round" d="M112 340v34a58 58 0 0 0 58 58h172a58 58 0 0 0 58-58v-34"/>
+</svg>

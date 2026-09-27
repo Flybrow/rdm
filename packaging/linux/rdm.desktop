@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=RDM
+GenericName=Download Manager
+GenericName[fr]=Gestionnaire de téléchargements
+Comment=Fast multi-connection download manager
+Comment[fr]=Gestionnaire de téléchargements rapide, multi-connexions
+Keywords=download;downloader;manager;idm;video;
+Keywords[fr]=téléchargement;télécharger;gestionnaire;idm;vidéo;
+Exec=rdm %U
+Icon=rdm
+Terminal=false
+Categories=Network;FileTransfer;
+StartupNotify=true
+StartupWMClass=rdm

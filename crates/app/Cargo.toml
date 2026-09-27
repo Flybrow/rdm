@@ -1,0 +1,100 @@
+[package]
+name = "rdm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+domain.workspace = true
+engine.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+eframe = { version = "0.32", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+# The event loop eframe runs on (same version as eframe's): RDM owns it, see `ui::run`.
+winit = { version = "0.30", default-features = false }
+# Vector icon font (MIT), matching egui 0.32.
+egui-phosphor = { version = "0.10", default-features = false, features = ["regular"] }
+# VirusTotal uploads (multipart, streamed from disk).
+reqwest = { workspace = true, features = ["multipart"] }
+tokio-util = { workspace = true, features = ["io"] }
+futures-util.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+uuid.workspace = true
+directories = "6"
+rfd = "0.15"
+opener = { version = "0.8", features = ["reveal"] }
+sha2 = "0.11"
+notify-rust = "4.18"
+# KSNI backend on Linux: pure-Rust D-Bus tray, no GTK / libappindicator needed.
+tray-icon = { version = "0.25", default-features = false, features = ["ksni"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+raw-window-handle = "0.6"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[package.metadata.deb]
+name = "rdm"
+maintainer = "RDM contributors"
+extended-description = "Lightweight multi-connection download manager with browser integration."
+section = "net"
+# Window, input and GL libraries are loaded at run time (dlopen): `$auto` cannot see them.
+depends = "$auto, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-cursor0, libwayland-egl1, libx11-6, libx11-xcb1, libxcursor1, libxrandr2, libxi6, libegl1, libgl1"
+recommends = "xdg-desktop-portal, xdg-desktop-portal-gnome | xdg-desktop-portal-kde | xdg-desktop-portal-gtk, gnome-shell-ubuntu-extensions | gnome-shell-extension-appindicator | plasma-workspace"
+assets = [
+    ["target/release/rdm", "usr/bin/", "755"],
+    ["../../packaging/linux/rdm.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/linux/icons/hicolor/16x16/apps/rdm.png", "usr/share/icons/hicolor/16x16/apps/", "644"],
+    ["../../packaging/linux/icons/hicolor/24x24/apps/rdm.png", "usr/share/icons/hicolor/24x24/apps/", "644"],
+    ["../../packaging/linux/icons/hicolor/32x32/apps/rdm.png", "usr/share/icons/hicolor/32x32/apps/", "644"],
+    ["../../packaging/linux/icons/hicolor/48x48/apps/rdm.png", "usr/share/icons/hicolor/48x48/apps/", "644"],
+    ["../../packaging/linux/icons/hicolor/64x64/apps/rdm.png", "usr/share/icons/hicolor/64x64/apps/", "644"],
+    ["../../packaging/linux/icons/hicolor/128x128/apps/rdm.png", "usr/share/icons/hicolor/128x128/apps/", "644"],
+    ["../../packaging/linux/icons/hicolor/256x256/apps/rdm.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+    ["../../packaging/linux/icons/hicolor/512x512/apps/rdm.png", "usr/share/icons/hicolor/512x512/apps/", "644"],
+    ["../../packaging/linux/icons/hicolor/scalable/apps/rdm.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+]
+
+# Fedora / openSUSE: `cargo generate-rpm -p crates/app` → `sudo dnf install ./target/generate-rpm/rdm-*.rpm`
+[package.metadata.generate-rpm]
+summary = "Lightweight multi-connection download manager"
+assets = [
+    { source = "target/release/rdm", dest = "/usr/bin/rdm", mode = "755" },
+    { source = "../../packaging/linux/rdm.desktop", dest = "/usr/share/applications/rdm.desktop", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/16x16/apps/rdm.png", dest = "/usr/share/icons/hicolor/16x16/apps/rdm.png", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/24x24/apps/rdm.png", dest = "/usr/share/icons/hicolor/24x24/apps/rdm.png", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/32x32/apps/rdm.png", dest = "/usr/share/icons/hicolor/32x32/apps/rdm.png", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/48x48/apps/rdm.png", dest = "/usr/share/icons/hicolor/48x48/apps/rdm.png", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/64x64/apps/rdm.png", dest = "/usr/share/icons/hicolor/64x64/apps/rdm.png", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/128x128/apps/rdm.png", dest = "/usr/share/icons/hicolor/128x128/apps/rdm.png", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/256x256/apps/rdm.png", dest = "/usr/share/icons/hicolor/256x256/apps/rdm.png", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/512x512/apps/rdm.png", dest = "/usr/share/icons/hicolor/512x512/apps/rdm.png", mode = "644" },
+    { source = "../../packaging/linux/icons/hicolor/scalable/apps/rdm.svg", dest = "/usr/share/icons/hicolor/scalable/apps/rdm.svg", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+libxkbcommon = "*"
+libxkbcommon-x11 = "*"
+libwayland-client = "*"
+libwayland-cursor = "*"
+libwayland-egl = "*"
+libX11 = "*"
+libX11-xcb = "*"
+libXcursor = "*"
+libXrandr = "*"
+libXi = "*"
+libglvnd-egl = "*"
+libglvnd-glx = "*"
+mesa-libEGL = "*"
+
+[package.metadata.generate-rpm.recommends]
+xdg-desktop-portal = "*"

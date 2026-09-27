@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="72" y1="40" x2="440" y2="472" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3D8BFF"/>
+      <stop offset="0.5" stop-color="#6A5CFF"/>
+      <stop offset="1" stop-color="#B24CFF"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.30"/>
+      <stop offset="0.52" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="256" cy="300" r="190" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ink" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E4E6FF"/>
+    </linearGradient>
+    <filter id="drop" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="11" flood-color="#1A0E5C" flood-opacity="0.38"/>
+    </filter>
+  </defs>
+  <rect x="32" y="32" width="448" height="448" rx="108" fill="url(#bg)"/>
+  <rect x="32" y="32" width="448" height="448" rx="108" fill="url(#glow)"/>
+  <rect x="32" y="32" width="448" height="448" rx="108" fill="url(#shine)"/>
+  <rect x="33.5" y="33.5" width="445" height="445" rx="106.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.18" stroke-width="3"/>
+  <g filter="url(#drop)">
+    <path fill="url(#ink)" d="M238 110h36a18 18 0 0 1 18 18v122h46a14 14 0 0 1 10.3 23.5l-82 88.6a14 14 0 0 1-20.6 0l-82-88.6A14 14 0 0 1 174 250h46V128a18 18 0 0 1 18-18z"/>
+    <path fill="none" stroke="url(#ink)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" d="M142 322v42a38 38 0 0 0 38 38h152a38 38 0 0 0 38-38v-42"/>
+  </g>
+</svg>
