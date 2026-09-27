@@ -4,7 +4,8 @@
 //! Defences:
 //! - `Origin`: browsers always set it on cross-origin requests; only *our* extension ID passes
 //!   (pinned by the manifest `key`), plus local non-browser tools (no `Origin`, already trusted);
-//!   Firefox extensions have a random per-install origin: accepted once the user approved it;
+//!   Firefox extensions have a random per-install origin: accepted once the user approved it
+//!   (Firefox sends `Origin` on POST only: the extension pairs with `POST /ping` when it starts);
 //! - `Host`: must be the loopback address, which defeats DNS rebinding;
 //! - JSON bodies (force a CORS preflight we never answer), 64 KiB cap, http(s) URLs only.
 
@@ -42,7 +43,8 @@ pub async fn bind() -> std::io::Result<TcpListener> {
 
 pub async fn serve(manager: Arc<Manager>, listener: TcpListener) {
     let app = Router::new()
-        .route("/ping", get(ping))
+        // POST: Firefox sends `Origin` on POST only, so this is how its extension pairs.
+        .route("/ping", get(ping).post(ping))
         .route("/config", get(config))
         .route("/add", post(add))
         .route("/probe", post(probe))
@@ -59,27 +61,29 @@ pub async fn serve(manager: Arc<Manager>, listener: TcpListener) {
     let _ = axum::serve(listener, app).await;
 }
 
-fn trusted(manager: &Manager, headers: &HeaderMap) -> bool {
-    trusted_with(headers, |origin| manager.firefox_allowed(origin))
+fn guard(manager: &Manager, headers: &HeaderMap) -> Result<(), StatusCode> {
+    guard_with(headers, |origin| manager.firefox_allowed(origin))
 }
 
-/// `firefox`: whether a (`moz-extension://…`) origin was approved by the user.
-fn trusted_with(headers: &HeaderMap, firefox: impl FnOnce(&str) -> bool) -> bool {
+/// `firefox`: whether a (`moz-extension://…`) origin was approved by the user. Such an origin not
+/// approved (yet) gets 401 — the extension then says "approve me in RDM", not "RDM is not
+/// running" — anything else untrusted gets 403.
+fn guard_with(headers: &HeaderMap, firefox: impl FnOnce(&str) -> bool) -> Result<(), StatusCode> {
     let host_ok = headers.get(HOST).and_then(|h| h.to_str().ok()).is_some_and(|h| {
         let host = h.rsplit_once(':').map_or(h, |(host, _)| host);
         matches!(host, "127.0.0.1" | "localhost")
     });
-    let origin_ok = match headers.get(ORIGIN).map(|o| o.to_str()) {
-        None => true,
-        Some(Ok(o)) if o == EXTENSION_ORIGIN => true,
-        Some(Ok(o)) if o.starts_with("moz-extension://") => host_ok && firefox(o),
-        Some(_) => false,
-    };
-    host_ok && origin_ok
-}
-
-fn guard(manager: &Manager, headers: &HeaderMap) -> Result<(), StatusCode> {
-    if trusted(manager, headers) { Ok(()) } else { Err(StatusCode::FORBIDDEN) }
+    if !host_ok {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    match headers.get(ORIGIN).map(|o| o.to_str()) {
+        None => Ok(()),
+        Some(Ok(o)) if o == EXTENSION_ORIGIN => Ok(()),
+        Some(Ok(o)) if o.starts_with("moz-extension://") => {
+            if firefox(o) { Ok(()) } else { Err(StatusCode::UNAUTHORIZED) }
+        }
+        Some(_) => Err(StatusCode::FORBIDDEN),
+    }
 }
 
 fn web(url: &Url) -> bool {
@@ -103,8 +107,8 @@ async fn config(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> Resu
 }
 
 async fn add(State(manager): State<Arc<Manager>>, headers: HeaderMap, Json(req): Json<AddRequest>) -> StatusCode {
-    if !trusted(&manager, &headers) {
-        return StatusCode::FORBIDDEN;
+    if let Err(status) = guard(&manager, &headers) {
+        return status;
     }
     if !web(&req.url) || req.audio_url.as_ref().is_some_and(|u| !web(u)) {
         return StatusCode::BAD_REQUEST;
@@ -217,8 +221,8 @@ async fn record_append(
     Query(chunk): Query<Chunk>,
     body: Bytes,
 ) -> StatusCode {
-    if !trusted(&manager, &headers) {
-        return StatusCode::FORBIDDEN;
+    if let Err(status) = guard(&manager, &headers) {
+        return status;
     }
     match manager.record_append(&token, chunk.ms, chunk.track, &body).await {
         Ok(true) => StatusCode::NO_CONTENT,
@@ -238,8 +242,8 @@ async fn record_progress(
     Path(token): Path<String>,
     Json(p): Json<Fraction>,
 ) -> StatusCode {
-    if !trusted(&manager, &headers) {
-        return StatusCode::FORBIDDEN;
+    if let Err(status) = guard(&manager, &headers) {
+        return status;
     }
     if !p.fraction.is_finite() {
         return StatusCode::BAD_REQUEST;
@@ -248,22 +252,22 @@ async fn record_progress(
 }
 
 async fn record_finish(State(manager): State<Arc<Manager>>, headers: HeaderMap, Path(token): Path<String>) -> StatusCode {
-    if !trusted(&manager, &headers) {
-        return StatusCode::FORBIDDEN;
+    if let Err(status) = guard(&manager, &headers) {
+        return status;
     }
     if manager.finish_recording(&token) { StatusCode::ACCEPTED } else { StatusCode::NOT_FOUND }
 }
 
 async fn record_cancel(State(manager): State<Arc<Manager>>, headers: HeaderMap, Path(token): Path<String>) -> StatusCode {
-    if !trusted(&manager, &headers) {
-        return StatusCode::FORBIDDEN;
+    if let Err(status) = guard(&manager, &headers) {
+        return status;
     }
     if manager.cancel_recording(&token, "enregistrement annulé") { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
 }
 
 async fn show(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> StatusCode {
-    if !trusted(&manager, &headers) {
-        return StatusCode::FORBIDDEN;
+    if let Err(status) = guard(&manager, &headers) {
+        return status;
     }
     manager.show();
     StatusCode::NO_CONTENT
@@ -287,30 +291,33 @@ pub async fn forward(url: Option<Url>) {
 mod tests {
     use super::*;
 
+    const FORBIDDEN: Result<(), StatusCode> = Err(StatusCode::FORBIDDEN);
+
     fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
         pairs.iter().map(|(k, v)| (k.parse().unwrap(), v.parse().unwrap())).collect()
     }
 
     #[test]
     fn origin_and_host_rules() {
-        let trusted = |h: &HeaderMap| trusted_with(h, |_| panic!("not a Firefox origin"));
-        assert!(trusted(&headers(&[("host", "127.0.0.1:9614"), ("origin", EXTENSION_ORIGIN)])));
-        assert!(trusted(&headers(&[("host", "localhost:9614")])));
-        assert!(!trusted(&headers(&[("host", "127.0.0.1:9614"), ("origin", "https://evil.example")])));
-        assert!(!trusted(&headers(&[("host", "127.0.0.1:9614"), ("origin", "chrome-extension://another")])));
-        assert!(!trusted(&headers(&[("host", "evil.example:9614"), ("origin", EXTENSION_ORIGIN)])));
-        assert!(!trusted(&headers(&[("host", "127.0.0.1.evil.example")])));
-        assert!(!trusted(&headers(&[])));
+        let guard = |h: &HeaderMap| guard_with(h, |_| panic!("not a Firefox origin"));
+        assert_eq!(guard(&headers(&[("host", "127.0.0.1:9614"), ("origin", EXTENSION_ORIGIN)])), Ok(()));
+        assert_eq!(guard(&headers(&[("host", "localhost:9614")])), Ok(()));
+        assert_eq!(guard(&headers(&[("host", "127.0.0.1:9614"), ("origin", "https://evil.example")])), FORBIDDEN);
+        assert_eq!(guard(&headers(&[("host", "127.0.0.1:9614"), ("origin", "chrome-extension://another")])), FORBIDDEN);
+        assert_eq!(guard(&headers(&[("host", "evil.example:9614"), ("origin", EXTENSION_ORIGIN)])), FORBIDDEN);
+        assert_eq!(guard(&headers(&[("host", "127.0.0.1.evil.example")])), FORBIDDEN);
+        assert_eq!(guard(&headers(&[])), FORBIDDEN);
     }
 
     #[test]
     fn firefox_origins_need_approval() {
         const FF: &str = "moz-extension://0f8e7a1c-3b2d-4e5f-9a8b-7c6d5e4f3a2b";
         let h = headers(&[("host", "127.0.0.1:9614"), ("origin", FF)]);
-        assert!(trusted_with(&h, |o| o == FF));
-        assert!(!trusted_with(&h, |_| false));
+        assert_eq!(guard_with(&h, |o| o == FF), Ok(()));
+        // Waiting for the user's approval: 401, told apart from a foreign caller.
+        assert_eq!(guard_with(&h, |_| false), Err(StatusCode::UNAUTHORIZED));
         // A foreign host is refused before anything is put up for approval.
         let h = headers(&[("host", "evil.example"), ("origin", FF)]);
-        assert!(!trusted_with(&h, |_| panic!("must not ask")));
+        assert_eq!(guard_with(&h, |_| panic!("must not ask")), FORBIDDEN);
     }
 }

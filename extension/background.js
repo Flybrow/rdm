@@ -23,8 +23,9 @@ const serially = (task) => (queue = queue.then(task).catch(() => {}));
 const isWeb = (url) => /^https?:\/\//i.test(url ?? "");
 
 async function call(path, { method = "GET", body, timeout = 1500 } = {}) {
+  let res = null;
   try {
-    return await fetch(`${BRIDGE}${path}`, {
+    res = await fetch(`${BRIDGE}${path}`, {
       method,
       body: body && JSON.stringify(body),
       headers: body ? { "content-type": "application/json" } : undefined,
@@ -33,7 +34,28 @@ async function call(path, { method = "GET", body, timeout = 1500 } = {}) {
   } catch {
     return null;
   }
+  // GETs carry no `Origin` in Firefox: only a POST tells whether RDM approved this extension.
+  if (method === "POST") setPaired(res.status !== UNPAIRED);
+  return res;
 }
+
+/**
+ * Firefox gives each install a random origin, which RDM only accepts once the user approved it in
+ * RDM's window (401 until then). The toolbar badge says so instead of silently failing.
+ */
+const UNPAIRED = 401;
+function setPaired(ok) {
+  // No in-memory "already set" shortcut: the badge outlives a sleeping service worker's state.
+  ext.action.setBadgeText({ text: ok ? "" : "!" }).catch(() => {});
+  if (!ok) ext.action.setBadgeBackgroundColor({ color: "#d97706" }).catch(() => {});
+  ext.action.setTitle({ title: ok ? "RDM" : "RDM — autorisez l'extension dans la fenêtre de RDM" }).catch(() => {});
+}
+
+/** Asks RDM for approval right away (Firefox), not at the first download, which it would refuse. */
+const pair = () => call("/ping", { method: "POST" });
+
+/** Outcome of a hand-off: true (accepted), "unpaired" (awaiting approval in RDM) or false. */
+const outcome = (res, accepted) => (res?.status === accepted ? true : res?.status === UNPAIRED ? "unpaired" : false);
 
 /** The app's settings (capture list) — `null` when RDM is not running. */
 async function appConfig() {
@@ -84,7 +106,7 @@ async function sendToApp(request) {
   if (!isWeb(url) || (audio_url && !isWeb(audio_url))) return false;
   const body = { ...(await context(request)), audio_url, filename };
   const res = await call("/add", { method: "POST", body, timeout: 5000 });
-  return res?.status === 202;
+  return outcome(res, 202);
 }
 
 /** HLS qualities, resolved by RDM (no CORS limits there). */
@@ -106,6 +128,7 @@ async function recordStart(page, filename) {
   const youtube = /^https:\/\/(www|m)\.youtube\.com\/watch\?/.test(page ?? "");
   if (!youtube || typeof filename !== "string" || !filename.trim()) return null;
   const res = await call("/record/start", { method: "POST", body: { page, filename }, timeout: 5000 });
+  if (res?.status === UNPAIRED) return "unpaired";
   const data = res?.ok ? await res.json().catch(() => null) : null;
   return typeof data?.token === "string" ? data.token : null;
 }
@@ -123,7 +146,7 @@ async function intercept(item) {
   // handing it over too would fetch the same file twice.
   if (!(await ext.downloads.pause(item.id).then(() => true, () => false))) return;
   const accepted = await sendToApp({ url, filename, referrer: item.referrer, storeId: item.cookieStoreId });
-  if (accepted) {
+  if (accepted === true) {
     await ext.downloads.cancel(item.id).catch(() => {});
     await ext.downloads.erase({ id: item.id }).catch(() => {});
   } else {
@@ -213,11 +236,13 @@ ext.runtime.onMessage.addListener((msg, sender, reply) => {
 // ── Toolbar button & context menu ────────────────────────────────────────
 ext.action.onClicked.addListener(() => call("/show", { method: "POST" }));
 
-ext.runtime.onInstalled.addListener(() =>
+ext.runtime.onInstalled.addListener(() => {
+  pair();
   ext.contextMenus
     .removeAll()
-    .then(() => ext.contextMenus.create({ id: "rdm", title: "Télécharger avec RDM", contexts: ["link", "video", "audio"] })),
-);
+    .then(() => ext.contextMenus.create({ id: "rdm", title: "Télécharger avec RDM", contexts: ["link", "video", "audio"] }));
+});
+ext.runtime.onStartup.addListener(pair);
 
 ext.contextMenus.onClicked.addListener(async ({ linkUrl, srcUrl, pageUrl, frameUrl }, tab) => {
   const url = linkUrl || srcUrl;

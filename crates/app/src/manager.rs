@@ -379,14 +379,19 @@ impl Manager {
         lock(&self.firefox).pending.clone()
     }
 
-    pub fn answer_firefox(&self, allow: bool) {
+    /// `None`: dismissed without answering — asked again at the extension's next request.
+    pub fn answer_firefox(&self, allow: Option<bool>) {
         let mut ff = lock(&self.firefox);
         let Some(origin) = ff.pending.take() else { return };
-        if allow {
-            save_json(FIREFOX_FILE, &origin);
-            ff.paired = Some(origin);
-        } else {
-            ff.refused.insert(origin);
+        match allow {
+            Some(true) => {
+                save_json(FIREFOX_FILE, &origin);
+                ff.paired = Some(origin);
+            }
+            Some(false) => {
+                ff.refused.insert(origin);
+            }
+            None => {}
         }
     }
 

@@ -72,6 +72,7 @@
       return last; // malformed %-escape: keep it raw rather than break the menu
     }
   };
+  const UNPAIRED_NOTE = "✗ Autorisez l'extension dans la fenêtre de RDM, puis réessayez";
   const send = (msg) => ext.runtime.sendMessage(msg).catch(() => undefined);
 
   const li = (className, title, detail, onClick) => {
@@ -92,7 +93,7 @@
   // `via`: how RDM must fetch the link — `{ user_agent, bare }` for YouTube, `{}` elsewhere.
   const download = (url, filename, audio_url, via = {}) => async () => {
     const ok = await send({ kind: "download", url, audio_url, filename, ...via });
-    show(note(ok ? "✓ Envoyé à RDM" : "✗ RDM n'est pas lancé"));
+    show(note(ok === true ? "✓ Envoyé à RDM" : ok === "unpaired" ? UNPAIRED_NOTE : "✗ RDM n'est pas lancé"));
     setTimeout(hide, 1400);
   };
   const action = (title, detail, url, filename, audio_url, via) =>
@@ -249,6 +250,7 @@
     if (!videoId) return show(note("✗ Ouvrez la vidéo elle-même (page « watch ») pour l'enregistrer."));
     show(note("Préparation de l'enregistrement…"));
     const token = await send({ kind: "record-start", filename });
+    if (token === "unpaired") return show(note(UNPAIRED_NOTE));
     if (typeof token !== "string") return show(note("✗ RDM n'est pas lancé"));
     sessionStorage.setItem("rdm-record", JSON.stringify({ token, videoId, at: Date.now() }));
     location.reload(); // the player must start afresh with the recorder in place (capture.js)

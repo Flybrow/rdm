@@ -111,7 +111,7 @@ Le dossier `extension/` se charge tel quel dans Chrome et Brave. Firefox utilise
 1. Générer la version Firefox : `sh packaging/firefox/build.sh` (Linux) ou `powershell -ExecutionPolicy Bypass -File packaging\firefox\build.ps1` (Windows) → dossier `target/firefox/`.
 2. Test : `about:debugging#/runtime/this-firefox` → **Charger un module temporaire** → `target/firefox/manifest.json`. Un module temporaire disparaît à la fermeture de Firefox.
 3. Installation durable : signer le paquet `rdm-firefox.xpi` produit par la CI (`npx web-ext sign --channel=unlisted --source-dir target/firefox`, compte addons.mozilla.org gratuit), puis l'ouvrir dans Firefox.
-4. Au premier envoi, **RDM demande d'autoriser l'extension Firefox** : Firefox donne à chaque installation une origine aléatoire (`moz-extension://…`), qui ne peut pas être fixée comme sur Chrome. Cliquer sur **Autoriser**. RDM redemande après une réinstallation (ou à chaque redémarrage de Firefox pour un module temporaire).
+4. Dès le chargement de l'extension (RDM lancé), **RDM demande d'autoriser l'extension Firefox** : Firefox donne à chaque installation une origine aléatoire (`moz-extension://…`), qui ne peut pas être fixée comme sur Chrome. Cliquer sur **Autoriser**. Tant que ce n'est pas fait, l'icône de l'extension affiche un badge **!** : un clic dessus fait réapparaître la demande (✕ remet la demande à plus tard ; **Refuser** la rejette jusqu'au redémarrage de RDM). RDM redemande après une réinstallation (ou à chaque redémarrage de Firefox pour un module temporaire).
 
 Lancer RDM. Si RDM est fermé, le navigateur télécharge normalement.
 

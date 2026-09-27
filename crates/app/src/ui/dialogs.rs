@@ -160,7 +160,7 @@ impl App<'_> {
         Modal::new(Id::new("firefox")).frame(dialog_frame(&p)).backdrop_color(backdrop(&p)).show(ctx, |ui| {
             ui.set_width(500.0);
             if dialog_header(ui, &p, icon::PUZZLE_PIECE, p.warning, "Extension Firefox", "Une extension demande à envoyer des téléchargements à RDM.") {
-                self.manager.answer_firefox(false);
+                self.manager.answer_firefox(None);
             }
             ui.add_space(14.0);
             Frame::new().fill(p.raised).corner_radius(12).inner_margin(Margin::same(12)).show(ui, |ui| {
@@ -175,10 +175,10 @@ impl App<'_> {
             ui.add_space(16.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if accent_button(ui, icon::CHECK, "Autoriser").clicked() {
-                    self.manager.answer_firefox(true);
+                    self.manager.answer_firefox(Some(true));
                 }
                 if ghost_button(ui, icon::X, "Refuser").clicked() {
-                    self.manager.answer_firefox(false);
+                    self.manager.answer_firefox(Some(false));
                 }
             });
         });
