@@ -3,7 +3,7 @@
 //! once trouble has been seen; when connections fail (timeouts, resets, a server refusing more
 //! with 429/503) it drops a quarter of them — half for an explicit refusal. A weak Wi-Fi, a
 //! saturated router or a picky server thus settle on what they can take, instead of every
-//! connection timing out ("délai dépassé") and the download failing.
+//! connection timing out ("timed out") and the download failing.
 
 use std::{
     sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed},
@@ -68,12 +68,14 @@ impl Pace {
         }
     }
 
-    /// Called once per second: raises the limit if the connections have been healthy, never above
-    /// `cap` (see [`speed_cap`]).
-    pub fn ramp(&self, cap: usize) -> usize {
+    /// Called once per second: raises the limit if the connections have been healthy and more of
+    /// them still pay off (`grow`, see [`Growth`]), never above `cap` (see [`speed_cap`]).
+    pub fn ramp(&self, cap: usize, grow: bool) -> usize {
         let trouble = self.last_trouble.load(Relaxed);
         let limit = self.limit.load(Relaxed);
-        let next = if trouble == 0 {
+        let next = if !grow {
+            limit
+        } else if trouble == 0 {
             limit.saturating_mul(2) // slow start: nothing went wrong yet
         } else if self.now().saturating_sub(trouble) >= millis(COOLDOWN) {
             limit + 1
@@ -101,6 +103,62 @@ impl Pace {
     }
 }
 
+/// Whether adding connections still pays off, judged on the measured throughput (hill climbing):
+/// after each increase it waits for the new connections to get going, then compares. A line that
+/// is already full (a slow ADSL, a Wi-Fi at its limit) stops growing — extra connections would only
+/// add overhead and unfairness to other traffic — and a new attempt is made every so often, in
+/// case the network got faster.
+#[derive(Default)]
+pub(crate) struct Growth {
+    /// Bytes per second over the last two ticks.
+    recent: [u64; 2],
+    /// Throughput before the last increase.
+    baseline: Option<u64>,
+    /// Ticks left before judging the last increase.
+    settle: u8,
+    /// Increases in a row that did not help.
+    misses: u8,
+    /// Ticks spent on the current plateau.
+    plateau: u16,
+}
+
+/// Ticks given to new connections (handshakes, TCP slow start) before judging them.
+const SETTLE_TICKS: u8 = 2;
+/// Ticks without improvement before calling it a plateau (throughput is noisy).
+const PATIENCE: u8 = 3;
+/// A plateau is tried again after this many ticks.
+const REPROBE_TICKS: u16 = 15;
+
+impl Growth {
+    /// Called once per tick with the bytes received during it; `true` when more connections may help.
+    pub fn more(&mut self, bytes: u64) -> bool {
+        // The very first tick has no predecessor: not averaged with a zero.
+        self.recent = if self.baseline.is_none() && self.settle == 0 { [bytes, bytes] } else { [self.recent[1], bytes] };
+        if self.settle > 0 {
+            self.settle -= 1;
+            return false;
+        }
+        let rate = (self.recent[0] + self.recent[1]) / 2;
+        let improved = self.baseline.is_none_or(|before| rate >= before.saturating_add(before / 10).max(1));
+        if !improved {
+            self.misses = self.misses.saturating_add(1);
+            if self.misses < PATIENCE {
+                return false;
+            }
+            // Plateau: hold, and probe once more after a while.
+            self.plateau += 1;
+            if self.plateau < REPROBE_TICKS {
+                return false;
+            }
+        }
+        self.baseline = Some(rate);
+        self.misses = 0;
+        self.plateau = 0;
+        self.settle = SETTLE_TICKS;
+        true
+    }
+}
+
 /// Under a speed limit (bytes per second, 0 = none), more connections only share the same bytes
 /// and wait longer for their turn — long enough, with many of them, for the server to time them
 /// out: one connection per 256 KiB/s allowed.
@@ -120,21 +178,21 @@ mod tests {
     fn starts_small_and_doubles_while_healthy() {
         let pace = Pace::new(32);
         assert_eq!(pace.limit(), INITIAL_CONNECTIONS);
-        assert_eq!(pace.ramp(usize::MAX), 16);
-        assert_eq!(pace.ramp(usize::MAX), 32);
-        assert_eq!(pace.ramp(usize::MAX), 32, "never above the configured maximum");
+        assert_eq!(pace.ramp(usize::MAX, true), 16);
+        assert_eq!(pace.ramp(usize::MAX, true), 32);
+        assert_eq!(pace.ramp(usize::MAX, true), 32, "never above the configured maximum");
         assert_eq!(Pace::new(3).limit(), 3);
     }
 
     #[test]
     fn backs_off_on_trouble_and_holds_during_cooldown() {
         let pace = Pace::new(32);
-        pace.ramp(usize::MAX);
+        pace.ramp(usize::MAX, true);
         pace.trouble(16, false);
         assert_eq!(pace.limit(), 12, "a quarter fewer");
         pace.trouble(12, false);
         assert_eq!(pace.limit(), 12, "a burst of failures is one event");
-        assert_eq!(pace.ramp(usize::MAX), 12, "no new connection right after trouble");
+        assert_eq!(pace.ramp(usize::MAX, true), 12, "no new connection right after trouble");
     }
 
     #[test]
@@ -155,8 +213,43 @@ mod tests {
         let pace = Pace::new(32);
         pace.cap(speed_cap(512 << 10));
         assert_eq!(pace.limit(), 2);
-        assert_eq!(pace.ramp(speed_cap(512 << 10)), 2);
-        assert_eq!(pace.ramp(usize::MAX), 4, "limit lifted: growing again");
+        assert_eq!(pace.ramp(speed_cap(512 << 10), true), 2);
+        assert_eq!(pace.ramp(usize::MAX, true), 4, "limit lifted: growing again");
+    }
+
+    #[test]
+    fn keeps_growing_while_throughput_rises() {
+        let mut g = Growth::default();
+        let mut rate = 1_000_000;
+        let mut increases = 0;
+        for _ in 0..30 {
+            if g.more(rate) {
+                increases += 1;
+                rate = rate * 3 / 2; // every increase pays off
+            }
+        }
+        assert!(increases >= 8, "{increases}");
+    }
+
+    #[test]
+    fn a_full_line_stops_growing_then_probes_again() {
+        let mut g = Growth::default();
+        let flat = 5_000_000;
+        let mut when = Vec::new();
+        for tick in 0..60 {
+            if g.more(flat) {
+                when.push(tick);
+            }
+        }
+        // The first try, then nothing until the plateau is probed again (every ~20 ticks).
+        assert!(when.len() <= 4, "{when:?}");
+        assert!(when.windows(2).all(|w| w[1] - w[0] >= usize::from(REPROBE_TICKS)), "{when:?}");
+    }
+
+    #[test]
+    fn holds_when_told_not_to_grow() {
+        let pace = Pace::new(64);
+        assert_eq!(pace.ramp(usize::MAX, false), INITIAL_CONNECTIONS);
     }
 
     #[test]

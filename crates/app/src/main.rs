@@ -3,9 +3,12 @@
 mod autostart;
 mod bridge;
 mod extension;
+mod i18n;
 mod manager;
+mod native;
 mod notify;
 mod priority;
+mod secrets;
 mod settings;
 mod shell;
 mod tray;
@@ -27,10 +30,18 @@ const QUIT_FLAG: &str = "--quit";
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Started by a browser as the extension's connector: relays, and nothing else (see `native`).
+    if native::is_host(&args) {
+        native::run_host();
+        return Ok(());
+    }
+    // Before anything can speak: messages (even the update assistant's) in the chosen language.
+    i18n::set(settings::Settings::load().language);
     // A copy of RDM started to install an update once RDM has quit (see `update`).
     if update::run_assistant(&args) {
         return Ok(());
     }
+    update::remember_exe();
     priority::full_speed_in_background();
     // Transfers are I/O-bound: a few workers drive 64 connections; fewer threads, less memory.
     let workers = std::thread::available_parallelism().map_or(2, |n| n.get().clamp(2, 4));
@@ -63,6 +74,7 @@ fn main() -> eframe::Result {
     // Copies of the extension installed by an older RDM get this version's files.
     std::thread::spawn(extension::refresh_installed);
     std::thread::spawn(update::clean_leftovers);
+    std::thread::spawn(native::register);
     let manager = Manager::new(rt.handle().clone(), engine::client().expect("http client"));
     if let Some(url) = url_arg {
         manager.add(AddRequest::from_url(url));
@@ -70,8 +82,13 @@ fn main() -> eframe::Result {
     rt.spawn(bridge::serve(manager.clone(), listener));
     #[cfg(unix)]
     rt.spawn(quit_on_signal(manager.clone()));
-    let result = ui::run(manager, minimized); // returns once the manager has shut down
-    rt.shutdown_timeout(RUNTIME_GRACE);
+    let result = ui::run(manager.clone(), minimized); // returns once the manager has shut down
+    let restart = manager.restart_requested();
+    drop(manager);
+    rt.shutdown_timeout(RUNTIME_GRACE); // frees the bridge port the new RDM needs
+    if restart {
+        update::relaunch(); // Linux, after an update: the new version
+    }
     result
 }
 
@@ -100,10 +117,12 @@ async fn single_instance(url: Option<&Url>) -> Option<tokio::net::TcpListener> {
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
-    notify::fatal(&format!(
-        "RDM ne peut pas démarrer : le port local 127.0.0.1:{} est occupé par un programme qui ne répond pas \
+    let port = settings::BRIDGE_PORT;
+    notify::fatal(&trf!(
+        "RDM ne peut pas démarrer : le port local 127.0.0.1:{port} est occupé par un programme qui ne répond pas \
          (un RDM bloqué ?). Fermez-le (Gestionnaire des tâches), puis relancez RDM.",
-        settings::BRIDGE_PORT
+        "RDM cannot start: the local port 127.0.0.1:{port} is taken by a program that does not answer \
+         (a stuck RDM?). Close it (Task Manager), then start RDM again."
     ));
     None
 }

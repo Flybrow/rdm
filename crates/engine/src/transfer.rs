@@ -20,14 +20,21 @@ use url::Url;
 
 use crate::{
     EngineError, Job, Outcome, Progress, RateLimit,
-    pace::{Pace, speed_cap},
+    pace::{Growth, Pace, speed_cap},
     probe,
     slots::{MIN_SPLIT, Slot, Slots},
     state_path,
 };
 
-/// Per-connection write buffer: 64 connections × 256 KiB = 16 MiB at most, same throughput as 1 MiB.
-const BUF: usize = 256 << 10;
+/// Write buffers of a download, all connections together: each connection gets its share, between
+/// `MIN_BUF` and `MAX_BUF` — few connections write big blocks (fewer system calls, fewer seeks on a
+/// hard disk), many connections stay within memory.
+const BUF_BUDGET: usize = 48 << 20;
+const MIN_BUF: usize = 256 << 10;
+const MAX_BUF: usize = 2 << 20;
+/// Data kept in a buffer is written after this long at most (slow connections).
+const FLUSH_AFTER: Duration = Duration::from_secs(5);
+
 /// Resume state written this often while downloading (data synced first).
 const CHECKPOINT: Duration = Duration::from_secs(20);
 /// How often the pacer may add connections.
@@ -48,7 +55,10 @@ struct Ctx {
     stop: CancellationToken,
     progress: Arc<Progress>,
     limit: Arc<RateLimit>,
+    own_limit: Arc<RateLimit>,
     pace: Pace,
+    /// Write buffer per connection.
+    buf: usize,
 }
 
 pub(crate) async fn run(
@@ -68,7 +78,7 @@ pub(crate) async fn run(
     }
     let state = state_path(&job.target);
     let pace = Pace::new(usize::from(job.connections));
-    pace.cap(speed_cap(job.limit.get()));
+    pace.cap(speed_cap(Job::effective_limit(&job.limit, &job.own_limit)));
 
     // An empty body is how expired/blocked media links (e.g. YouTube) answer: never report it as done.
     if info.size == Some(0) {
@@ -101,7 +111,9 @@ pub(crate) async fn run(
         stop: cancel.child_token(),
         progress,
         limit: job.limit.clone(),
+        own_limit: job.own_limit.clone(),
         pace,
+        buf: (BUF_BUDGET / usize::from(job.connections.max(1))).clamp(MIN_BUF, MAX_BUF),
     });
     ctx.progress.total.store(info.size.unwrap_or(0), Relaxed);
     ctx.progress.downloaded.store(ctx.slots.downloaded(), Relaxed);
@@ -119,6 +131,7 @@ pub(crate) async fn run(
     let mut checkpoint = interval_at(Instant::now() + CHECKPOINT, CHECKPOINT);
     let mut ramp = interval_at(Instant::now() + RAMP_EVERY, RAMP_EVERY);
     ramp.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let (mut growth, mut counted) = (Growth::default(), ctx.progress.downloaded.load(Relaxed));
     loop {
         tokio::select! {
             joined = workers.join_next() => {
@@ -134,7 +147,10 @@ pub(crate) async fn run(
             }
             // More connections while they help: waiting pieces first, then halves of the largest.
             _ = ramp.tick(), if info.ranges && failure.is_none() && !ctx.stop.is_cancelled() => {
-                let limit = ctx.pace.ramp(speed_cap(ctx.limit.get()));
+                let now = ctx.progress.downloaded.load(Relaxed);
+                let grow = growth.more(now.saturating_sub(counted));
+                counted = now;
+                let limit = ctx.pace.ramp(speed_cap(Job::effective_limit(&ctx.limit, &ctx.own_limit)), grow);
                 while ctx.progress.active.load(Acquire) < limit {
                     let Some(slot) = ctx.slots.steal() else { break };
                     spawn(&mut workers, &ctx, slot);
@@ -208,6 +224,7 @@ async fn fetch_with_retry(ctx: &Ctx, slot: &Arc<Slot>, active: &mut Active) -> R
             attempt = 0;
         }
         ctx.pace.trouble(ctx.progress.active.load(Acquire), err.is_throttled());
+        err.forget_address();
         if ctx.ranges && active.try_leave() {
             ctx.slots.release(slot.clone());
             return Ok(false);
@@ -273,7 +290,10 @@ async fn fetch(ctx: &Ctx, slot: &Slot) -> Result<(), EngineError> {
     let mut file = OpenOptions::new().write(true).open(&ctx.path).await?;
     file.seek(SeekFrom::Start(pos)).await?;
     let mut stream = res.bytes_stream();
-    let mut buf = Vec::with_capacity(BUF);
+    // Grows with the connection's speed up to its share: slow connections (flushed every few
+    // seconds) never hold the full size.
+    let mut buf = Vec::with_capacity(MIN_BUF.min(ctx.buf));
+    let mut flushed = Instant::now();
     // Hot loop (thousands of chunks per second per connection): the stop token — shared by every
     // connection of the job — is subscribed to once, not re-registered under its lock per chunk.
     let stopped = ctx.stop.cancelled();
@@ -293,22 +313,32 @@ async fn fetch(ctx: &Ctx, slot: &Slot) -> Result<(), EngineError> {
         let written = slot.pos.load(Acquire) + buf.len() as u64;
         let room = slot.end.load(Acquire).saturating_add(1).saturating_sub(written);
         let n = min(chunk.len() as u64, room) as usize;
+        if buf.len() + n > buf.capacity() {
+            // Doubles towards this connection's share, never beyond it (plus this chunk).
+            let target = (buf.capacity() * 2).clamp(MIN_BUF, ctx.buf).max(buf.len() + n);
+            buf.reserve_exact(target - buf.len());
+        }
         buf.extend_from_slice(&chunk[..n]);
         ctx.progress.downloaded.fetch_add(n as u64, Relaxed);
         ctx.pace.progressed(); // something arrived: the connection is alive, however slow
-        // Throttling sleeps can be long: they must not delay a pause/shutdown.
-        if ctx.limit.get() > 0 {
-            tokio::select! {
-                biased;
-                () = &mut stopped => {}
-                () = ctx.limit.take(n) => {}
+        // Throttling sleeps can be long: they must not delay a pause/shutdown. The global limit, then
+        // this download's own.
+        for limit in [&ctx.limit, &ctx.own_limit] {
+            if limit.get() > 0 {
+                tokio::select! {
+                    biased;
+                    () = &mut stopped => {}
+                    () = limit.take(n) => {}
+                }
             }
         }
         if n < chunk.len() {
             break Ok(false);
         }
-        if buf.len() >= BUF {
+        // Full, or held for a while (a slow connection): to disk, where a checkpoint can count it.
+        if buf.len() >= ctx.buf || flushed.elapsed() >= FLUSH_AFTER {
             flush(&mut file, &mut buf, slot).await?;
+            flushed = Instant::now();
         }
     };
     if !buf.is_empty() {

@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "RDM — Rust Download Manager",
-  "version": "0.3.1",
-  "description": "Envoie les téléchargements et les vidéos détectées vers RDM.",
+  "name": "__MSG_extName__",
+  "version": "0.4.0",
+  "description": "__MSG_extDescription__",
+  "default_locale": "en",
   "minimum_chrome_version": "121",
   "browser_specific_settings": {
     "gecko": {
@@ -12,7 +13,7 @@
     }
   },
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoi3hDM75DEXRcYzkd9FIEynsz1KfiIX5fzR5xb0Dx1HLZjfqyFiR9FCAgkG+ycP5i4ZG0PC2twxSVO0nJbzz+UYpYmAxoRDMLqkiYfj9ufu3cXxkG4RWwpxm5SEnzhlrzPWuqPg1na86NOu7NZIKyk2q1C98u3aoInyREJcbBrfPHxIguhjhRSgt/UcJRORnCmcNrE034XPJbZ3GhQRgXqOZxld1gArW8Y7D+/sRUVyji87B8StuR1WWzvqLPiSsUGb0zcpK3optPyRbzxVUbLNFz6kprKfUDyqBSBd2+cmbyZp/xfAwZGGYpMJTiUvuMneCY/q4l8TEAZlc3V8pHwIDAQAB",
-  "permissions": ["downloads", "cookies", "webRequest", "contextMenus", "storage", "alarms"],
+  "permissions": ["downloads", "cookies", "webRequest", "contextMenus", "storage", "alarms", "nativeMessaging"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js", "type": "module" },
   "content_scripts": [

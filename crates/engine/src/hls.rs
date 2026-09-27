@@ -87,11 +87,12 @@ struct Http<'a> {
     origin: &'a Url,
     keys: Mutex<HashMap<Url, Arc<[u8]>>>,
     limit: &'a RateLimit,
+    own_limit: &'a RateLimit,
 }
 
 pub(crate) async fn info(client: &Client, url: &Url, headers: &HeaderMap) -> Result<HlsInfo, EngineError> {
     let limit = RateLimit::default();
-    let http = Http { client, headers, origin: url, keys: Mutex::default(), limit: &limit };
+    let http = Http { client, headers, origin: url, keys: Mutex::default(), limit: &limit, own_limit: &limit };
     match load(&http, url).await? {
         Playlist::Media { fmp4, .. } => Ok(HlsInfo { variants: Vec::new(), fmp4 }),
         Playlist::Master(variants) => {
@@ -110,7 +111,7 @@ pub(crate) async fn run(
     progress: Arc<Progress>,
     cancel: CancellationToken,
 ) -> Result<Outcome, EngineError> {
-    let http = Http { client, headers: &job.headers, origin: &job.url, keys: Mutex::default(), limit: &job.limit };
+    let http = Http { client, headers: &job.headers, origin: &job.url, keys: Mutex::default(), limit: &job.limit, own_limit: &job.own_limit };
     let n = job.connections;
     // Playlists load with retries: a pause must not wait for them.
     let plan = async {
@@ -377,7 +378,9 @@ fn parse_byterange(v: &str) -> Option<(u64, Option<u64>)> {
 
 async fn fetch_part(http: &Http<'_>, part: Part) -> Result<Vec<u8>, EngineError> {
     let data = get(http, &part.url, part.range, MAX_PART_BYTES).await?;
-    http.limit.take(data.len()).await; // dropped with the stream on cancel
+    // Dropped with the stream on cancel.
+    http.limit.take(data.len()).await;
+    http.own_limit.take(data.len()).await;
     let Some(key) = part.key else { return Ok(data) };
     let cached = http.keys.lock().unwrap_or_else(PoisonError::into_inner).get(&key.url).cloned();
     let secret = match cached {
@@ -405,7 +408,10 @@ async fn get(http: &Http<'_>, url: &Url, range: Option<(u64, u64)>, max: u64) ->
         match get_once(http, url, range, max).await {
             Ok(data) => return Ok(data),
             Err(e) if attempt >= RETRIES || e.is_permanent() => return Err(e),
-            Err(_) => attempt += 1,
+            Err(e) => {
+                e.forget_address();
+                attempt += 1;
+            }
         }
         tokio::time::sleep(Duration::from_millis(250 << attempt.min(5))).await;
     }

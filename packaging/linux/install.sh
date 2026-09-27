@@ -16,6 +16,23 @@ hicolor="$data/icons/hicolor"
 deps=1
 autostart=0
 
+# Where RDM registers the browser extension's connector (native messaging host) at start.
+native_hosts() {
+    for d in .config/google-chrome/NativeMessagingHosts .config/google-chrome-beta/NativeMessagingHosts \
+        .config/chromium/NativeMessagingHosts .config/BraveSoftware/Brave-Browser/NativeMessagingHosts \
+        .config/microsoft-edge/NativeMessagingHosts .config/vivaldi/NativeMessagingHosts \
+        .config/opera/NativeMessagingHosts .mozilla/native-messaging-hosts .waterfox/native-messaging-hosts \
+        .librewolf/native-messaging-hosts; do
+        printf '%s\n' "$HOME/$d/rdm.bridge.json"
+    done
+}
+
+# Whether RDM itself runs (the browsers' connectors run the same binary: not counted).
+rdm_running() {
+    command -v pgrep >/dev/null || return 1
+    pgrep -a -x rdm 2>/dev/null | grep -v -e 'chrome-extension://' -e 'rdm@rdm-download-manager' -e 'rdm.bridge.json' | grep -q .
+}
+
 # The user's Desktop folder (localized: "Bureau"…), empty when there is none.
 desktop_folder() {
     dir=$(command -v xdg-user-dir >/dev/null && xdg-user-dir DESKTOP 2>/dev/null || true)
@@ -30,6 +47,7 @@ for arg in "$@"; do
             dir=$(desktop_folder)
             [ -z "$dir" ] || rm -f "$dir/rdm.desktop"
             rm -f "$bin/rdm" "$apps/rdm.desktop" "$config/autostart/rdm.desktop"
+            native_hosts | while read -r host; do rm -f "$host"; done
             find "$hicolor" -path '*/apps/rdm.*' -delete 2>/dev/null || true
             command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t "$hicolor" 2>/dev/null || true
             echo "RDM uninstalled (settings kept in $config/rdm)."
@@ -192,7 +210,7 @@ fi
 # A running RDM is closed cleanly first (downloads saved), by the new binary — an older one would
 # not know the option — and started again afterwards, in its new version.
 was_running=0
-if command -v pgrep >/dev/null && pgrep -x rdm >/dev/null 2>&1; then
+if rdm_running; then
     was_running=1
     "$exe" --quit >/dev/null 2>&1 || true
 fi
@@ -234,7 +252,7 @@ Exec="$bin/rdm" --minimized
 Icon=rdm
 X-GNOME-Autostart-enabled=true
 EOF
-    # Tick "Lancer au démarrage" in RDM's settings too (created, or updated in place).
+    # Tick "Start with the system" in RDM's settings too (created, or updated in place).
     settings="$config/rdm/settings.json"
     if [ ! -s "$settings" ]; then
         printf '{"autostart":true}\n' >"$settings"
@@ -275,8 +293,8 @@ case ":$PATH:" in
 esac
 
 if [ "$was_running" -eq 1 ]; then
-    if pgrep -x rdm >/dev/null 2>&1; then
-        warn "the previous RDM is still running (too old to close on request): quit it (tray icon → Quitter) and start it again"
+    if rdm_running; then
+        warn "the previous RDM is still running (too old to close on request): quit it (tray icon → Quit) and start it again"
     else
         say "Starting the new RDM"
         nohup "$bin/rdm" >/dev/null 2>&1 &
@@ -284,4 +302,4 @@ if [ "$was_running" -eq 1 ]; then
 fi
 
 say "RDM installed to $bin/rdm"
-echo "    Browser extension (Firefox, Waterfox, Chrome, Brave, Opera, Edge): in RDM, card « Extension navigateur »."
+echo "    Browser extension (Firefox, Waterfox, Chrome, Brave, Opera, Edge): in RDM, the \"Browser extension\" card."

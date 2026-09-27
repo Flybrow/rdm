@@ -12,7 +12,7 @@ use super::{
     theme::{self, Palette},
     widgets::{self, accent_button, caption, field, icon_button, speed},
 };
-use crate::{manager::Stats, settings::Theme, update};
+use crate::{manager::Stats, settings::Theme, tr, trf, update};
 
 impl App<'_> {
     pub(super) fn sidebar(&mut self, ctx: &Context, actions: &mut Vec<Action>) {
@@ -31,30 +31,54 @@ impl App<'_> {
             .fill(p.sidebar)
             .inner_margin(Margin { left: 14, right: 14, top: 18, bottom: 16 })
             .stroke(Stroke::new(theme::HAIRLINE, p.border));
+        let settings = self.manager.settings();
+        // Named queues: shown once there is more than the main one.
+        let queues: Vec<(Filter, usize)> = if settings.queues.is_empty() {
+            Vec::new()
+        } else {
+            let ids: Vec<u32> = std::iter::once(0).chain(settings.queues.iter().map(|q| q.id)).collect();
+            self.manager.view(|es| {
+                ids.iter()
+                    .map(|&q| (Filter::Queue(q), es.iter().filter(|e| Filter::Queue(q).accepts(e) && e.download.status() != &domain::Status::Completed).count()))
+                    .collect()
+            })
+        };
+        if matches!(self.memo.filter, Filter::Queue(q) if q != 0 && !settings.queues.iter().any(|x| x.id == q)) {
+            self.memo.filter = Filter::All; // its queue was deleted
+        }
         SidePanel::left("nav").exact_width(240.0).resizable(false).frame(frame).show(ctx, |ui| {
             self.brand(ui, &p);
             ui.add_space(24.0);
-            for (i, ((filter, glyph), n)) in NAV.into_iter().zip(counts).enumerate() {
-                if i == STATUS_FILTERS {
-                    ui.add_space(16.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(10.0);
-                        caption(ui, "CATÉGORIES");
-                    });
-                    ui.add_space(2.0);
+            // The filters scroll if the window is short; the cards below always stay visible.
+            let update = self.manager.update_state();
+            let reserved = if update.release().is_some() || update.busy() { 250.0 } else { 170.0 };
+            let height = (ui.available_height() - reserved).max(120.0);
+            eframe::egui::ScrollArea::vertical().max_height(height).auto_shrink([false, true]).show(ui, |ui| {
+                for (i, ((filter, glyph), n)) in NAV.into_iter().zip(counts).enumerate() {
+                    if i == STATUS_FILTERS {
+                        section_caption(ui, tr!("CATÉGORIES", "CATEGORIES"));
+                    }
+                    if matches!(filter, Filter::Kind(_) | Filter::Failed) && n == 0 && self.memo.filter != filter {
+                        continue;
+                    }
+                    let hue = match filter {
+                        Filter::Kind(c) => Some(p.category(c)),
+                        Filter::Failed => Some(p.danger),
+                        _ => None,
+                    };
+                    if nav_item(ui, &p, glyph, hue, &filter.title_short(&settings), n, self.memo.filter == filter) {
+                        self.memo.filter = filter;
+                    }
                 }
-                if matches!(filter, Filter::Kind(_) | Filter::Failed) && n == 0 && self.memo.filter != filter {
-                    continue;
+                if !queues.is_empty() {
+                    section_caption(ui, tr!("FILES D'ATTENTE", "QUEUES"));
+                    for (filter, n) in queues {
+                        if nav_item(ui, &p, icon::QUEUE, None, &filter.title(&settings), n, self.memo.filter == filter) {
+                            self.memo.filter = filter;
+                        }
+                    }
                 }
-                let hue = match filter {
-                    Filter::Kind(c) => Some(p.category(c)),
-                    Filter::Failed => Some(p.danger),
-                    _ => None,
-                };
-                if nav_item(ui, &p, glyph, hue, filter.title_short(), n, self.memo.filter == filter) {
-                    self.memo.filter = filter;
-                }
-            }
+            });
             ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
                 ui.label(RichText::new(concat!("RDM ", env!("CARGO_PKG_VERSION"))).font(theme::regular(11.0)).color(p.faint));
                 ui.add_space(6.0);
@@ -90,22 +114,22 @@ impl App<'_> {
 
     /// A newer release is out (or being downloaded): brand-gradient card with one button.
     fn update_card(&mut self, ui: &mut Ui, p: &Palette) -> Option<Action> {
-        let installs = |r: &update::Release| r.msi.is_some() && update::can_self_install();
         // (title, detail, clickable, moving, tooltip)
         let (title, detail, clickable, moving, tip) = match self.manager.update_state() {
             update::State::Available(r) => {
-                let detail = if installs(&r) { "Cliquer pour installer" } else { "Voir la nouvelle version" };
-                (format!("Version {} disponible", r.version), detail.to_owned(), true, false, None)
+                let detail = if update::installs_itself(&r) { tr!("Cliquer pour installer", "Click to install") } else { tr!("Voir la nouvelle version", "See the new version") };
+                let version = &r.version;
+                (trf!("Version {version} disponible", "Version {version} available"), detail.to_owned(), true, false, None)
             }
-            update::State::Downloading(f) => ("Mise à jour…".to_owned(), format!("téléchargement {} %", (f * 100.0) as u32), false, true, None),
-            update::State::Installing => ("Installation…".to_owned(), "RDM redémarre tout seul".to_owned(), false, true, None),
-            update::State::InstallFailed(r, reason) => (
-                format!("Version {} : échec", r.version),
-                "Cliquer pour réessayer".to_owned(),
-                true,
-                false,
-                Some(reason),
-            ),
+            update::State::Downloading(f) => {
+                let pct = (f * 100.0) as u32;
+                (tr!("Mise à jour…", "Updating…").to_owned(), trf!("téléchargement {pct} %", "downloading {pct} %"), false, true, None)
+            }
+            update::State::Installing => (tr!("Installation…", "Installing…").to_owned(), tr!("RDM redémarre tout seul", "RDM restarts by itself").to_owned(), false, true, None),
+            update::State::InstallFailed(r, reason) => {
+                let version = &r.version;
+                (trf!("Version {version} : échec", "Version {version}: failed"), tr!("Cliquer pour réessayer", "Click to retry").to_owned(), true, false, Some(reason))
+            }
             _ => return None,
         };
         let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 72.0), Sense::click());
@@ -145,10 +169,10 @@ impl App<'_> {
         let color = if limit > 0 { p.warning } else { p.success };
         painter.rect_filled(tile, 10, p.tint(color, 0.16));
         painter.text(tile.center(), Align2::CENTER_CENTER, icon::GAUGE, theme::regular(18.0), color);
-        painter.text(pos2(tile.right() + 12.0, rect.top() + 19.0), Align2::LEFT_CENTER, "Limite de vitesse", theme::regular(12.0), p.muted);
-        let value = if limit == 0 { "Illimitée".to_owned() } else { speed(f64::from(limit) * 1024.0) };
+        painter.text(pos2(tile.right() + 12.0, rect.top() + 19.0), Align2::LEFT_CENTER, tr!("Limite de vitesse", "Speed limit"), theme::regular(12.0), p.muted);
+        let value = if limit == 0 { tr!("Illimitée", "Unlimited").to_owned() } else { speed(f64::from(limit) * 1024.0) };
         painter.text(pos2(tile.right() + 12.0, rect.top() + 39.0), Align2::LEFT_CENTER, value, theme::semibold(14.0), p.text);
-        response.on_hover_text("Modifier dans les paramètres")
+        response.on_hover_text(tr!("Modifier dans les paramètres", "Change in the settings"))
     }
 
     pub(super) fn header(&mut self, ctx: &Context) {
@@ -161,25 +185,25 @@ impl App<'_> {
                     ui.spacing_mut().item_spacing.x = 10.0;
                     let right = 250.0 + 2.0 * 32.0 + 40.0;
                     let add_width = (ui.available_width() - right - 170.0).max(200.0);
-                    let add = field(ui, Id::new(ADD_ID), &mut self.memo.url, "Collez un ou plusieurs liens à télécharger…", icon::LINK, add_width);
+                    let add = field(ui, Id::new(ADD_ID), &mut self.memo.url, tr!("Collez un ou plusieurs liens à télécharger…", "Paste one or more links to download…"), icon::LINK, add_width);
                     let enter = add.lost_focus() && ui.input(|i| i.key_pressed(eframe::egui::Key::Enter));
-                    if (accent_button(ui, icon::DOWNLOAD_SIMPLE, "Télécharger").clicked() || enter) && !self.memo.url.trim().is_empty() {
+                    if (accent_button(ui, icon::DOWNLOAD_SIMPLE, tr!("Télécharger", "Download")).clicked() || enter) && !self.memo.url.trim().is_empty() {
                         let text = std::mem::take(&mut self.memo.url);
                         if self.submit(&text) == 0 {
                             self.memo.url = text;
                         }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icon_button(ui, icon::GEAR_SIX, "Paramètres", None).clicked() {
+                        if icon_button(ui, icon::GEAR_SIX, tr!("Paramètres", "Settings"), None).clicked() {
                             self.open_settings();
                         }
                         let dark = ui.visuals().dark_mode;
                         let (glyph, tip, next) =
-                            if dark { (icon::SUN, "Thème clair", Theme::Light) } else { (icon::MOON, "Thème sombre", Theme::Dark) };
+                            if dark { (icon::SUN, tr!("Thème clair", "Light theme"), Theme::Light) } else { (icon::MOON, tr!("Thème sombre", "Dark theme"), Theme::Dark) };
                         if icon_button(ui, glyph, tip, None).clicked() {
                             self.set_theme(ctx, next);
                         }
-                        field(ui, Id::new(SEARCH_ID), &mut self.memo.search, "Rechercher  (Ctrl+F)", icon::MAGNIFYING_GLASS, 240.0);
+                        field(ui, Id::new(SEARCH_ID), &mut self.memo.search, tr!("Rechercher  (Ctrl+F)", "Search  (Ctrl+F)"), icon::MAGNIFYING_GLASS, 240.0);
                     });
                 });
             });
@@ -213,7 +237,7 @@ impl App<'_> {
         let inner = rect.shrink2(vec2(28.0, 22.0));
         let left = Rect::from_min_size(inner.min, vec2(300.0, inner.height()));
         ui.scope_builder(UiBuilder::new().max_rect(left).layout(Layout::top_down(Align::Min)), |ui| {
-            caption(ui, "VITESSE DE TÉLÉCHARGEMENT");
+            caption(ui, tr!("VITESSE DE TÉLÉCHARGEMENT", "DOWNLOAD SPEED"));
             ui.add_space(-2.0);
             let (value, unit) = split_speed(stats.speed);
             ui.horizontal(|ui| {
@@ -224,10 +248,10 @@ impl App<'_> {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 16.0;
-                stat(ui, &p, icon::ARROW_CIRCLE_DOWN, &format!("{} actif(s)", stats.running), p.accent);
-                stat(ui, &p, icon::HOURGLASS, &format!("{} en attente", stats.queued), p.muted);
+                stat(ui, &p, icon::ARROW_CIRCLE_DOWN, &crate::i18n::count(stats.running as u64, ("actif", "actifs"), ("active", "active")), p.accent);
+                stat(ui, &p, icon::HOURGLASS, &trf!("{} en attente", "{} waiting", stats.queued), p.muted);
                 if let Some(eta) = (stats.speed > 1.0 && stats.total > stats.done).then(|| ((stats.total - stats.done) as f64 / stats.speed) as u64) {
-                    stat(ui, &p, icon::TIMER, &format!("reste {}", widgets::duration(eta)), p.muted);
+                    stat(ui, &p, icon::TIMER, &trf!("reste {}", "{} left", widgets::duration(eta)), p.muted);
                 }
             });
         });
@@ -236,12 +260,12 @@ impl App<'_> {
         let history = self.manager.speed_history();
         let peak = history.iter().copied().fold(0.0f32, f32::max);
         let painter = ui.painter();
-        painter.text(pos2(chart.left(), inner.top() + 6.0), Align2::LEFT_CENTER, "Dernière minute", theme::semibold(11.5), p.muted);
+        painter.text(pos2(chart.left(), inner.top() + 6.0), Align2::LEFT_CENTER, tr!("Dernière minute", "Last minute"), theme::semibold(11.5), p.muted);
         if peak > 0.0 {
             painter.text(
                 pos2(chart.right(), inner.top() + 6.0),
                 Align2::RIGHT_CENTER,
-                format!("pic {}", speed(f64::from(peak))),
+                trf!("pic {}", "peak {}", speed(f64::from(peak))),
                 theme::regular(11.5),
                 p.muted,
             );
@@ -252,12 +276,22 @@ impl App<'_> {
 }
 
 impl Filter {
-    fn title_short(self) -> &'static str {
+    fn title_short(self, settings: &crate::settings::Settings) -> String {
         match self {
-            Self::All => "Tous",
-            other => other.title(),
+            Self::All => tr!("Tous", "All").to_owned(),
+            other => other.title(settings),
         }
     }
+}
+
+/// A caption between groups of sidebar entries.
+fn section_caption(ui: &mut Ui, text: &str) {
+    ui.add_space(16.0);
+    ui.horizontal(|ui| {
+        ui.add_space(10.0);
+        caption(ui, text);
+    });
+    ui.add_space(2.0);
 }
 
 /// `12,4` and `Mo/s`, set apart in the dashboard.

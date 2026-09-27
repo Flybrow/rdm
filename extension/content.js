@@ -3,6 +3,8 @@
   if (window.__rdm) return;
   window.__rdm = true;
   const ext = globalThis.browser ?? globalThis.chrome; // Firefox / Chrome
+  /** The browser's language (English by default, see `_locales`). */
+  const t = (key, ...subs) => ext.i18n.getMessage(key, subs.map(String)) || key;
 
   const MIN_W = 160;
   const MIN_H = 90;
@@ -42,10 +44,11 @@
     </style>
     <button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"
       stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11"/><path d="m7 11 5 5 5-5"/><path d="M5 20h14"/></svg>
-      <span>Télécharger cette vidéo</span></button>
+      <span></span></button>
     <ul class="menu" hidden></ul>`;
   const btn = root.querySelector(".btn");
   const menu = root.querySelector(".menu");
+  btn.querySelector("span").textContent = t("downloadVideo");
 
   let target = null;
   let hideTimer = 0;
@@ -57,7 +60,7 @@
   const isHttp = (u) => /^https?:\/\//i.test(u ?? "");
   const human = (n) => {
     if (!n) return "";
-    const units = ["o", "Ko", "Mo", "Go"];
+    const units = t("sizeUnits").split(" ");
     const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
     return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${units[i]}`;
   };
@@ -72,7 +75,7 @@
       return last; // malformed %-escape: keep it raw rather than break the menu
     }
   };
-  const UNPAIRED_NOTE = "✗ Autorisez l'extension dans la fenêtre de RDM, puis réessayez";
+  const UNPAIRED_NOTE = `✗ ${t("unpaired")}`;
   const send = (msg) => ext.runtime.sendMessage(msg).catch(() => undefined);
 
   const li = (className, title, detail, onClick) => {
@@ -93,7 +96,7 @@
   // `via`: how RDM must fetch the link — `{ user_agent, bare }` for YouTube, `{}` elsewhere.
   const download = (url, filename, audio_url, via = {}) => async () => {
     const ok = await send({ kind: "download", url, audio_url, filename, ...via });
-    show(note(ok === true ? "✓ Envoyé à RDM" : ok === "unpaired" ? UNPAIRED_NOTE : "✗ RDM n'est pas lancé"));
+    show(note(ok === true ? t("sent") : ok === "unpaired" ? UNPAIRED_NOTE : t("notRunningShort")));
     setTimeout(hide, ok === true ? 1400 : 5000);
   };
   const action = (title, detail, url, filename, audio_url, via) =>
@@ -104,23 +107,23 @@
   function hlsItems(url, info, base, via) {
     const ext = info?.fmp4 ? "mp4" : "ts";
     const usable = (info?.variants ?? []).filter((v) => !v.audio || info.fmp4);
-    if (!usable.length) return [action(`${base}.${ext}`, "Meilleure qualité disponible", url, `${base}.${ext}`, undefined, via)];
+    if (!usable.length) return [action(`${base}.${ext}`, t("bestQuality"), url, `${base}.${ext}`, undefined, via)];
     return usable.map((v) => {
       const kbps = `${Math.round(v.bandwidth / 1000)} kb/s`;
       const quality = v.height ? `${v.height}p` : kbps;
       const filename = `${base} (${quality}).${ext}`;
-      return action(filename, `${quality} · ${kbps}${v.audio ? " · audio séparé" : ""}`, v.url, filename, v.audio ?? undefined, via);
+      return action(filename, `${quality} · ${kbps}${v.audio ? ` · ${t("separateAudio")}` : ""}`, v.url, filename, v.audio ?? undefined, via);
     });
   }
 
   async function hlsMenu(url, base, via = {}) {
     const gen = ++generation;
     view = "hls";
-    show(note("Lecture des qualités…"));
+    show(note(t("readingQualities")));
     const info = await send({ kind: "probe", url, ...via });
     if (gen !== generation) return;
-    if (!info) return show(note("✗ Flux illisible (RDM est-il lancé ?)"));
-    show(section("Choisir la qualité"), ...hlsItems(url, info, base, via));
+    if (!info) return show(note(t("unreadableStream")));
+    show(section(t("chooseQuality")), ...hlsItems(url, info, base, via));
   }
 
   // ── YouTube: formats resolved in-page by youtube.js ──────────────────
@@ -135,7 +138,7 @@
       const onMessage = (e) => {
         if (e.source === window && e.data?.source === "rdm-yt" && e.data.nonce === nonce) done(e.data.result ?? {});
       };
-      const timer = setTimeout(() => done({ error: "délai dépassé" }), YT_TIMEOUT);
+      const timer = setTimeout(() => done({ error: t("timedOut") }), YT_TIMEOUT);
       addEventListener("message", onMessage);
       window.postMessage({ source: "rdm", type: "yt-resolve", nonce }, location.origin);
     });
@@ -161,7 +164,7 @@
       if (!cur || f.bitrate > cur.bitrate) videos.set(f.height, f);
     }
     if (bestAudio && videos.size) {
-      items.push(section("Vidéo + audio (fusion automatique)"));
+      items.push(section(t("videoAudioMerged")));
       for (const v of [...videos.values()].sort((a, b) => b.height - a.height)) {
         const label = v.label || `${v.height}p`;
         const filename = `${base} (${label}).mp4`;
@@ -171,7 +174,7 @@
     }
     const muxed = formats.filter((f) => f.video && f.audio).sort((a, b) => b.height - a.height);
     if (muxed.length) {
-      items.push(section("Vidéo avec son"));
+      items.push(section(t("videoWithSound")));
       for (const m of muxed) {
         const filename = `${base} (${m.label || `${m.height}p`}).${m.container}`;
         const detail = [m.label, human(m.size), m.container.toUpperCase()].filter(Boolean).join(" · ");
@@ -180,7 +183,7 @@
     }
     const audios = formats.filter((f) => f.audio && !f.video).sort((a, b) => b.bitrate - a.bitrate);
     if (audios.length) {
-      items.push(section("Audio seul"));
+      items.push(section(t("audioOnly")));
       for (const a of audios.slice(0, 2)) {
         const ext = a.container === "mp4" ? "m4a" : "weba";
         const filename = `${base}.${ext}`;
@@ -191,12 +194,12 @@
     return items;
   }
 
-  const describeRefusal = (res) => (res?.status ? `HTTP ${res.status}` : "injoignable");
+  const describeRefusal = (res) => (res?.status ? `HTTP ${res.status}` : t("unreachable"));
 
   async function youtubeMenu() {
     const gen = ++generation;
     view = "youtube";
-    show(note("Recherche des qualités YouTube…"));
+    show(note(t("findingQualities")));
     const yt = await youtubeFormats();
     if (gen !== generation) return;
     const base = safeName(yt.title || pageTitle());
@@ -204,7 +207,7 @@
     const items = [];
 
     // Direct links: the first client whose links really download from RDM wins.
-    show(note("Vérification des liens auprès de YouTube…"));
+    show(note(t("checkingLinks")));
     for (const c of yt.clients ?? []) {
       const formats = c.formats.filter((f) => isYouTubeMedia(f.url));
       const sample = formats.find((f) => f.audio && !f.video) ?? formats[0];
@@ -216,7 +219,7 @@
         items.push(...formatItems(formats, base, via));
         break;
       }
-      notes.push(`${c.client} : liens refusés (${describeRefusal(res)})`);
+      notes.push(t("linksRefused", c.client, describeRefusal(res)));
     }
 
     // HLS as an alternative (or the only way): listed once RDM could read it.
@@ -226,20 +229,20 @@
       const info = await send({ kind: "probe", url: c.hls, ...via });
       if (gen !== generation) return;
       if (info?.variants) {
-        items.push(section("Flux HLS"), ...hlsItems(c.hls, info, base, via));
+        items.push(section(t("hlsStream")), ...hlsItems(c.hls, info, base, via));
         break;
       }
-      notes.push(`${c.client} : flux HLS illisible`);
+      notes.push(t("hlsUnreadable", c.client));
     }
 
     if (yt.drm) {
-      items.push(note("Vidéo protégée par DRM : non téléchargeable."));
+      items.push(note(t("drm")));
     } else {
-      if (!items.length) items.push(note("Téléchargement direct refusé par YouTube (jeton anti-robot requis) : utilisez l'enregistrement."));
+      if (!items.length) items.push(note(t("directRefused")));
       // Always available: records what YouTube's own player receives (see capture.js).
       const minutes = target?.duration ? Math.ceil(target.duration / 2 / 60) : null;
-      const detail = `Lecture muette en 2×, qualité maximale${minutes ? ` · environ ${minutes} min` : ""} · la page va se recharger`;
-      items.push(section("Enregistrement"), li("action", `${base}.mp4`, detail, () => startRecording(`${base}.mp4`)));
+      const detail = t("recordDetail", minutes ? t("aboutMinutes", minutes) : "");
+      items.push(section(t("recording")), li("action", `${base}.mp4`, detail, () => startRecording(`${base}.mp4`)));
     }
     show(...items);
   }
@@ -247,11 +250,11 @@
   // ── YouTube recording: page reload in recording mode, relay to RDM, progress banner ──
   async function startRecording(filename) {
     const videoId = new URL(location.href).searchParams.get("v");
-    if (!videoId) return show(note("✗ Ouvrez la vidéo elle-même (page « watch ») pour l'enregistrer."));
-    show(note("Préparation de l'enregistrement…"));
+    if (!videoId) return show(note(t("openWatchPage")));
+    show(note(t("preparingRecording")));
     const token = await send({ kind: "record-start", filename });
     if (token === "unpaired") return show(note(UNPAIRED_NOTE));
-    if (typeof token !== "string") return show(note("✗ RDM n'est pas lancé"));
+    if (typeof token !== "string") return show(note(t("notRunningShort")));
     sessionStorage.setItem("rdm-record", JSON.stringify({ token, videoId, at: Date.now() }));
     location.reload(); // the player must start afresh with the recorder in place (capture.js)
   }
@@ -276,10 +279,12 @@
                  cursor: pointer; font: inherit; font-weight: 600; transition: background .12s ease; }
         button:hover { background: #ffffff26; }
       </style>
-      <div class="bar"><span class="dot"></span><span class="text">RDM prépare l'enregistrement…</span><button>Annuler</button></div>`;
+      <div class="bar"><span class="dot"></span><span class="text"></span><button></button></div>`;
     const bar = shadow.querySelector(".bar");
     const text = shadow.querySelector(".text");
     const cancel = shadow.querySelector("button");
+    text.textContent = t("rdmPreparing");
+    cancel.textContent = t("cancel");
     document.documentElement.append(banner);
 
     const frame = document.createElement("iframe");
@@ -306,30 +311,29 @@
         // Player → RDM (zero-copy transfer of the media chunk).
         toRelay(msg, msg.data instanceof ArrayBuffer ? [msg.data] : []);
         if (msg.type === "progress" && !over && msg.ad) {
-          text.textContent = "Publicité en cours (non enregistrée) — l'enregistrement reprend juste après";
+          text.textContent = t("adPlaying");
         } else if (msg.type === "progress" && !over) {
           const f = Math.min(Math.max(msg.fraction, 0), 1);
           const left = f > 0.02 ? Math.round(((Date.now() - started) / 1000) * (1 - f) / f) : null;
-          const eta = left == null ? "" : left >= 60 ? ` · reste ${Math.ceil(left / 60)} min` : ` · reste ${left} s`;
-          text.textContent = msg.paused && f < 0.01
-            ? "Cliquez sur la vidéo pour lancer l'enregistrement"
-            : `RDM enregistre cette vidéo · ${Math.floor(f * 100)} %${eta}`;
+          const eta = left == null ? "" : left >= 60 ? t("minutesLeft", Math.ceil(left / 60)) : t("secondsLeft", left);
+          text.textContent = msg.paused && f < 0.01 ? t("clickToStart") : t("recordingProgress", Math.floor(f * 100), eta);
         }
-        if (msg.type === "end") text.textContent = "Fusion en cours dans RDM…";
-        if (msg.type === "abort") finish(`✗ Enregistrement annulé : ${msg.reason}`, false);
+        if (msg.type === "end") text.textContent = t("merging");
+        // capture.js (page world, no translations) sends reason codes.
+        if (msg.type === "abort") finish(t("recordingAborted", msg.reason === "video-changed" ? t("videoChanged") : String(msg.reason)), false);
       } else if (e.source === frame.contentWindow && msg.source === "rdm-relay") {
         if (msg.type === "loaded") control("ready");
-        if (msg.type === "finished") finish("✓ Enregistrement terminé : le fichier est dans RDM", true);
+        if (msg.type === "finished") finish(t("recordingDone"), true);
         if (msg.type === "error") {
           control("cancel");
-          finish(`✗ Enregistrement interrompu (${msg.reason}) — RDM est-il lancé ?`, false);
+          finish(t("recordingInterrupted", msg.reason), false);
         }
       }
     });
     cancel.addEventListener("click", () => {
       control("cancel");
       toRelay({ source: "rdm-rec", token, type: "abort" });
-      finish("Enregistrement annulé", false);
+      finish(t("recordingCancelled"), false);
     });
     document.documentElement.append(frame);
   }
@@ -352,13 +356,13 @@
     const items = [...(target ? elementSources(target) : []), ...network.sort((a, b) => b.size - a.size)].filter(
       ({ url }) => isHttp(url) && !seen.has(url) && seen.add(url),
     );
-    if (!items.length) return show(note("Aucun flux détecté — lancez la lecture, puis réessayez."));
+    if (!items.length) return show(note(t("noStream")));
     const base = pageTitle();
     show(
-      section("Vidéos détectées"),
+      section(t("detectedVideos")),
       ...items.map((m) =>
         m.hls
-          ? li("action", `${base} (flux HLS)`, "Choisir la qualité…", () => hlsMenu(m.url, base))
+          ? li("action", t("hlsName", base), t("chooseQualityMore"), () => hlsMenu(m.url, base))
           : action(nameOf(m.url), [human(m.size), m.type].filter(Boolean).join(" · "), m.url, nameOf(m.url)),
       ),
     );

@@ -2,7 +2,7 @@
 # Chromium flavour of the extension (Chrome, Brave, Opera, Edge, Vivaldi, Chromium):
 #   sh packaging/chromium/build.sh [output dir, default target/chromium]
 #
-# The folder loads as is ("Charger l'extension non empaquetée", developer mode on), and
+# The folder loads as is ("Load unpacked", developer mode on), and
 # rdm-chromium.zip next to it is that folder as one file to hand around. A .crx cannot serve this
 # purpose: Chrome, Brave and Edge only install .crx packages coming from their store. RDM itself
 # installs the extension in one click (the extension window) and keeps it up to date.

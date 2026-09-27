@@ -31,4 +31,22 @@ for (const f of fs.readdirSync(".").filter((f) => f !== "test")) {
   if (f !== "manifest.json" && !fs.existsSync(process.env.FIREFOX + "/" + f)) fail("Firefox build lacks " + f);
 }
 console.log("json   OK  manifest.json (Chrome) + Firefox build")'
+# Translations: the same messages in every language, and every message the scripts ask for exists.
+node -e '
+const fs = require("fs");
+const fail = (m) => { throw new Error(m); };
+const locales = fs.readdirSync("_locales");
+const keys = (l) => Object.keys(JSON.parse(fs.readFileSync(`_locales/${l}/messages.json`, "utf8")));
+const en = keys("en");
+for (const l of locales) {
+  const k = keys(l);
+  const missing = en.filter((x) => !k.includes(x)).concat(k.filter((x) => !en.includes(x)));
+  if (missing.length) fail(`_locales/${l}: ${missing.join(", ")} differ from en`);
+}
+const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+for (const [, key] of JSON.stringify(manifest).matchAll(/__MSG_(\w+)__/g)) if (!en.includes(key)) fail(`manifest: ${key} undefined`);
+for (const f of ["background.js", "content.js"]) {
+  for (const [, key] of fs.readFileSync(f, "utf8").matchAll(/\bt\("(\w+)"/g)) if (!en.includes(key)) fail(`${f}: message ${key} undefined`);
+}
+console.log(`i18n   OK  ${locales.join(" + ")} (${en.length} messages)`)'
 node --test test/*.test.mjs

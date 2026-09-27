@@ -5,6 +5,7 @@ mod browsers;
 mod card;
 mod chrome;
 mod dialogs;
+mod edit;
 mod theme;
 mod toast;
 mod widgets;
@@ -36,6 +37,7 @@ use winit::{
 use crate::{
     manager::{AddRequest, Entry, Manager, Scan, ScanRefused, Stats},
     settings::{Settings, Theme},
+    tr, trf,
     shell::{Shell, Wake},
     tray::{self, Tray},
     window::{self, Window},
@@ -54,6 +56,10 @@ const TRAY_ICON: (&[u8], u32) = (ICON_RGBA, ICON_SIZE);
 const LOGO_RGBA: &[u8] = include_bytes!("../../assets/logo128.rgba");
 /// Frame rate while something moves (bars, spinners, toasts); nothing is redrawn when idle.
 const ANIMATION_FRAME: Duration = Duration::from_millis(33);
+/// Frame rate while only progress changes: 15 per second with the window in front, 2 behind it
+/// (numbers still move; the processor and the battery are spared).
+const PROGRESS_FRAME: Duration = Duration::from_millis(66);
+const BACKGROUND_FRAME: Duration = Duration::from_millis(500);
 /// Settings are written once the user stops fiddling (sliders fire every frame).
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(600);
 /// Windowless (in the tray only): how often the tooltip's transfer summary is refreshed.
@@ -256,15 +262,22 @@ fn open_window(
     event_loop.run_app_on_demand(&mut app)?;
     drop(app);
     // The window (or its OpenGL context) could not be created: nothing to reopen later either.
-    if created { Ok(()) } else { Err(eframe::Error::AppCreation("la fenêtre n'a pas pu être créée".into())) }
+    if created { Ok(()) } else { Err(eframe::Error::AppCreation(tr!("la fenêtre n'a pas pu être créée", "the window could not be created").into())) }
 }
 
 /// Tooltip text while something downloads; `None` when idle.
 fn tray_summary(stats: Stats) -> Option<String> {
     (stats.running > 0).then(|| {
         let pct = stats.done.saturating_mul(100).checked_div(stats.total).map(|p| format!(" · {p} %")).unwrap_or_default();
-        format!("RDM — {} actif(s) · {}{pct}", stats.running, speed(stats.speed))
+        let (n, rate) = (stats.running, speed(stats.speed));
+        let n = crate::i18n::count(n as u64, ("actif", "actifs"), ("active", "active"));
+        format!("RDM — {n} · {rate}{pct}")
     })
+}
+
+/// A size in the interface's units ("1,5 Mo" / "1.5 MB"), for messages built outside the UI.
+pub(crate) fn size_text(n: u64) -> String {
+    widgets::bytes(n)
 }
 
 fn preference(theme: Theme) -> ThemePreference {
@@ -283,6 +296,8 @@ enum Filter {
     Done,
     Failed,
     Kind(Category),
+    /// A named queue (0 = the main one).
+    Queue(u32),
 }
 
 impl Filter {
@@ -295,18 +310,32 @@ impl Filter {
             Self::Done => *status == Status::Completed,
             Self::Failed => matches!(status, Status::Failed(_)),
             Self::Kind(c) => e.category == c,
+            Self::Queue(q) => e.download.queue == q && !e.download.is_recording(),
         }
     }
 
-    fn title(self) -> &'static str {
+    fn title(self, settings: &Settings) -> String {
         match self {
-            Self::All => "Tous les téléchargements",
-            Self::Active => "En cours",
-            Self::Queued => "En attente",
-            Self::Done => "Terminés",
-            Self::Failed => "Échecs",
-            Self::Kind(c) => c.label(),
+            Self::All => tr!("Tous les téléchargements", "All downloads").into(),
+            Self::Active => tr!("En cours", "Active").into(),
+            Self::Queued => tr!("En attente", "Waiting").into(),
+            Self::Done => tr!("Terminés", "Completed").into(),
+            Self::Failed => tr!("Échecs", "Failed").into(),
+            Self::Kind(c) => c.label(crate::i18n::english()).into(),
+            Self::Queue(q) => queue_name(settings, q),
         }
+    }
+}
+
+/// A queue's name as shown (the main queue has no name of its own).
+fn queue_name(settings: &Settings, queue: u32) -> String {
+    match settings.queues.iter().find(|q| q.id == queue) {
+        Some(q) if !q.name.is_empty() => q.name.clone(),
+        Some(q) => {
+            let id = q.id;
+            trf!("File {id}", "Queue {id}")
+        }
+        None => tr!("File principale", "Main queue").into(),
     }
 }
 
@@ -343,7 +372,12 @@ enum Action {
     Remove(DownloadId, bool),
     Open(PathBuf),
     Reveal(PathBuf),
+    /// Text to copy, and what it is (for the confirmation).
     Copy(String, &'static str),
+    /// Opens a small editor on one download (new link, speed limit, checksum).
+    Edit(DownloadId, edit::Field),
+    SetInsecure(DownloadId, bool),
+    MoveToQueue(DownloadId, u32),
     Hash(DownloadId),
     Scan(DownloadId),
     ShowReport(DownloadId),
@@ -401,6 +435,8 @@ struct App<'a> {
     logo: TextureHandle,
     /// Settings dialog draft, while open.
     settings: Option<Settings>,
+    /// Passwords edited in the settings (proxy, site logins), while open.
+    secrets: Option<crate::secrets::Secrets>,
     unsaved_since: Option<Instant>,
     /// Reveal the VirusTotal key in the settings.
     show_key: bool,
@@ -410,9 +446,13 @@ struct App<'a> {
     browsers: Option<browsers::Browsers>,
     /// Download whose VirusTotal report is open.
     report: Option<DownloadId>,
+    /// The small editor open on one download, if any.
+    edit: Option<edit::Editor>,
     toasts: Toasts,
     /// Something on screen moves this frame (progress, spinner): keep redrawing.
     animating: bool,
+    /// Frames still to draw right away after a dialog or menu closed.
+    settle_frames: u8,
     /// Rendering without vsync: frames are spaced out by `pace`.
     paced: bool,
     last_frame: Option<Instant>,
@@ -437,13 +477,16 @@ impl<'a> App<'a> {
             memo,
             logo,
             settings: None,
+            secrets: None,
             unsaved_since: None,
             show_key: false,
             asking_key: false,
             report: None,
             browsers: None,
+            edit: None,
             toasts: Toasts::default(),
             animating: false,
+            settle_frames: 0,
             paced,
             last_frame: None,
         };
@@ -487,15 +530,16 @@ impl<'a> App<'a> {
         let n = urls.len();
         urls.into_iter().for_each(|u| self.manager.add(AddRequest::from_url(u)));
         match n {
-            0 => self.toasts.warn(icon::LINK_BREAK, "Aucun lien http(s) à télécharger"),
-            1 => self.toasts.info(icon::DOWNLOAD_SIMPLE, "Téléchargement ajouté"),
-            n => self.toasts.info(icon::DOWNLOAD_SIMPLE, &format!("{n} téléchargements ajoutés")),
+            0 => self.toasts.warn(icon::LINK_BREAK, tr!("Aucun lien http(s) à télécharger", "No http(s) link to download")),
+            1 => self.toasts.info(icon::DOWNLOAD_SIMPLE, tr!("Téléchargement ajouté", "Download added")),
+            n => self.toasts.info(icon::DOWNLOAD_SIMPLE, &trf!("{n} téléchargements ajoutés", "{n} downloads added")),
         }
         n
     }
 
     fn open_settings(&mut self) {
         self.settings = Some(self.manager.settings());
+        self.secrets = Some(self.manager.secrets());
     }
 
     /// Ctrl+V anywhere (no text field focused) adds the copied link(s), like IDM; Ctrl+F searches.
@@ -522,22 +566,31 @@ impl<'a> App<'a> {
                 Action::Remove(id, delete) => {
                     self.manager.remove(id, delete);
                     if delete {
-                        self.toasts.info(icon::TRASH, "Fichier supprimé");
+                        self.toasts.info(icon::TRASH, tr!("Fichier supprimé", "File deleted"));
                     }
                 }
                 Action::Open(path) => open_file(path),
                 Action::Reveal(path) => reveal_file(path),
                 Action::Copy(text, what) => {
+                    self.manager.copied_by_rdm(&text);
                     ctx.copy_text(text);
-                    self.toasts.info(icon::COPY, &format!("{what} copié"));
+                    self.toasts.info(icon::COPY, &trf!("{what} copié", "{what} copied"));
                 }
+                Action::Edit(id, field) => self.edit = edit::Editor::open(&self.manager, id, field),
+                Action::SetInsecure(id, insecure) => {
+                    self.manager.set_insecure(id, insecure);
+                    if insecure {
+                        self.toasts.warn(icon::WARNING, tr!("Certificat accepté pour ce téléchargement seulement", "Certificate accepted for this download only"));
+                    }
+                }
+                Action::MoveToQueue(id, queue) => self.manager.move_to_queue(id, queue),
                 Action::Hash(id) => self.manager.compute_sha256(id),
                 Action::Scan(id) => match self.manager.scan_virustotal(id) {
-                    Ok(()) => self.toasts.info(icon::SHIELD, "Analyse VirusTotal lancée"),
+                    Ok(()) => self.toasts.info(icon::SHIELD, tr!("Analyse VirusTotal lancée", "VirusTotal analysis started")),
                     Err(ScanRefused::NoKey) => {
                         self.open_settings();
                         self.asking_key = true;
-                        self.toasts.warn(icon::KEY, "Ajoutez d'abord votre clé API VirusTotal (gratuite)");
+                        self.toasts.warn(icon::KEY, tr!("Ajoutez d'abord votre clé API VirusTotal (gratuite)", "Add your (free) VirusTotal API key first"));
                     }
                     Err(ScanRefused::NotEligible) => {}
                 },
@@ -548,7 +601,12 @@ impl<'a> App<'a> {
                     let n = self.manager.view(|es| es.iter().filter(|e| *e.download.status() == Status::Completed).count());
                     self.manager.clear_completed();
                     if n > 0 {
-                        self.toasts.info(icon::BROOM, &format!("{n} téléchargement(s) terminé(s) retiré(s) de la liste"));
+                        let text = crate::i18n::count(
+                            n as u64,
+                            ("téléchargement terminé retiré de la liste", "téléchargements terminés retirés de la liste"),
+                            ("completed download removed from the list", "completed downloads removed from the list"),
+                        );
+                        self.toasts.info(icon::BROOM, &text);
                     }
                 }
                 Action::OpenSettings => self.open_settings(),
@@ -586,8 +644,22 @@ impl eframe::App for App<'_> {
         self.shortcuts(ctx);
         let stats = self.manager.stats();
         let mut actions = Vec::new();
+        // A dialog or menu closing: two more frames at once, without it. egui matches clicks
+        // against the previous frame, and keeps a dialog's modal layer one frame longer: otherwise
+        // the next click would still hit the closed dialog and be lost.
+        let overlays = (self.settings.is_some(), self.report.is_some(), self.browsers.is_some(), self.edit.is_some());
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.settle_frames = 2;
+        }
         self.animating = false;
 
+        for notice in self.manager.take_notices() {
+            if notice.warning {
+                self.toasts.warn(icon::WARNING, &notice.text);
+            } else {
+                self.toasts.info(icon::INFO, &notice.text);
+            }
+        }
         backdrop(ctx);
         self.sidebar(ctx, &mut actions);
         self.header(ctx);
@@ -595,21 +667,35 @@ impl eframe::App for App<'_> {
             .frame(Frame::new().inner_margin(Margin { left: 26, right: 26, top: 6, bottom: 0 }))
             .show(ctx, |ui| {
                 self.dashboard(ui, stats);
+                self.clipboard_banner(ui);
                 self.list(ui, &mut actions);
             });
         self.settings_dialog(ctx);
         self.report_dialog(ctx, &mut actions);
         self.browsers_dialog(ctx);
+        self.edit_dialog(ctx);
         self.firefox_prompt(ctx);
         self.apply(ctx, actions);
+        if overlays != (self.settings.is_some(), self.report.is_some(), self.browsers.is_some(), self.edit.is_some()) {
+            self.settle_frames = 2;
+        }
+        if self.settle_frames > 0 {
+            self.settle_frames -= 1;
+            ctx.request_repaint();
+        }
         let toasts = self.toasts.show(ctx);
 
         if let Some(tray) = self.tray.as_deref_mut() {
+            tray.relabel();
             tray.set_tooltip(tray_summary(stats));
         }
         self.flush_settings(ctx);
-        if self.animating || toasts || stats.running > 0 {
+        // Animations at full rate; progress alone at a lower one, lower still behind other windows.
+        if self.animating || toasts {
             ctx.request_repaint_after(ANIMATION_FRAME);
+        } else if stats.running > 0 {
+            let focused = ctx.input(|i| i.focused);
+            ctx.request_repaint_after(if focused { PROGRESS_FRAME } else { BACKGROUND_FRAME });
         }
         self.memo.keep_geometry(ctx);
         self.pace();

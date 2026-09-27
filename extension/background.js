@@ -2,8 +2,14 @@ import { isCapturable, isHls, isMediaType, isMediaUrl, siteOf } from "./shared.j
 
 // Chrome, Brave, Opera, Edge (`chrome`) and Firefox (`browser`): same promise-based API.
 const ext = globalThis.browser ?? globalThis.chrome;
+/** The browser's language (English by default, see `_locales`). */
+const t = (key, ...subs) => ext.i18n.getMessage(key, subs.map(String)) || key;
 
 const BRIDGE = "http://127.0.0.1:9614";
+/** RDM's connector, started by the browser itself (see RDM's `native.rs`). */
+const NATIVE_HOST = "rdm.bridge";
+/** An idle connection to the connector is closed: the browser (and the connector) can rest. */
+const NATIVE_IDLE_MS = 60_000;
 const MIN_MEDIA_BYTES = 256 * 1024; // ignore stream fragments and previews
 const MAX_ITEMS_PER_TAB = 60; // bounds session storage on pages that stream many unique URLs
 /** Checks in with RDM this often while the browser runs (RDM shows the extension as connected). */
@@ -45,8 +51,105 @@ const isWeb = (url) => /^https?:\/\//i.test(url ?? "");
 /** RDM is running but did not answer in time (busy disk, starting up): not the same as absent. */
 const TIMEOUT = Symbol("timeout");
 
+/**
+ * The connector: one connection, opened on demand, closed when idle. Requests carry an id; the
+ * connector answers `{ id, status, body }` (status 0: RDM not running, 1: no answer in time,
+ * 2: refused). `null` when the connector is not available (not registered, sandboxed browser):
+ * the bridge is then called directly.
+ */
+const native = {
+  port: null,
+  nextId: 1,
+  pending: new Map(),
+  idleTimer: 0,
+  /** Unavailable until this time (ms): not retried on every request. */
+  downUntil: 0,
+
+  connect() {
+    if (this.port) return this.port;
+    if (Date.now() < this.downUntil || typeof ext.runtime.connectNative !== "function") return null;
+    let port;
+    try {
+      port = ext.runtime.connectNative(NATIVE_HOST);
+    } catch {
+      this.downUntil = Date.now() + 5 * 60_000;
+      return null;
+    }
+    let answered = false;
+    port.onMessage.addListener((msg) => {
+      answered = true;
+      const resolve = this.pending.get(msg?.id);
+      if (resolve) {
+        this.pending.delete(msg.id);
+        resolve(msg);
+      }
+      this.touch();
+    });
+    port.onDisconnect.addListener(() => {
+      void ext.runtime.lastError; // read: an absent connector is expected, not an error to log
+      if (this.port === port) this.port = null;
+      // Never answered: the connector is missing or cannot start here; the bridge is used instead.
+      if (!answered) this.downUntil = Date.now() + 5 * 60_000;
+      for (const resolve of this.pending.values()) resolve(null);
+      this.pending.clear();
+    });
+    this.port = port;
+    return port;
+  },
+
+  touch() {
+    clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      if (this.pending.size) return this.touch();
+      this.port?.disconnect();
+      this.port = null;
+    }, NATIVE_IDLE_MS);
+  },
+
+  /** The connector's answer, or `null` when it is unavailable. */
+  request(message, timeout) {
+    const port = this.connect();
+    if (!port) return Promise.resolve(null);
+    const id = this.nextId++;
+    this.touch();
+    // The connector bounds each request itself; starting RDM (explicit actions) takes longer.
+    const slack = STARTS_RDM.has(message.path) ? 25_000 : 3_000;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        resolve({ id, status: 1, body: "" });
+      }, timeout + slack);
+      this.pending.set(id, (msg) => {
+        clearTimeout(timer);
+        resolve(msg);
+      });
+      try {
+        port.postMessage({ ...message, id, timeout });
+      } catch {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        resolve(null);
+      }
+    });
+  },
+};
+
+/** Requests on which the connector starts RDM if it is not running (the user asked for them). */
+const STARTS_RDM = new Set(["/add", "/show", "/record/start"]);
+const NULL_BODY = new Set([204, 205, 304]);
+
 /** A response, `TIMEOUT`, or `null` when RDM is not running. */
 async function call(path, { method = "GET", body, timeout = 3000 } = {}) {
+  const reply = await native.request({ method, path, body, browser: await BROWSER }, timeout);
+  if (reply) {
+    if (reply.status === 0) return null;
+    if (reply.status === 1) return TIMEOUT;
+    if (reply.status >= 200 && reply.status <= 599) {
+      setPaired(true); // the connector needs no approval
+      return new Response(NULL_BODY.has(reply.status) ? null : reply.body, { status: reply.status });
+    }
+    // Refused by the connector (an older RDM): the bridge itself.
+  }
   let res;
   try {
     const headers = { "x-rdm-browser": await BROWSER };
@@ -72,16 +175,27 @@ const answered = (res) => res && res !== TIMEOUT;
  * RDM's window (401 until then). The toolbar badge says so instead of silently failing.
  */
 const UNPAIRED = 401;
-const UNPAIRED_TEXT = "Autorisez l'extension dans la fenêtre de RDM, puis réessayez";
+const UNPAIRED_TEXT = t("unpaired");
 function setPaired(ok) {
   // No in-memory "already set" shortcut: the badge outlives a sleeping service worker's state.
   ext.action.setBadgeText({ text: ok ? "" : "!" }).catch(() => {});
   if (!ok) ext.action.setBadgeBackgroundColor({ color: "#d97706" }).catch(() => {});
-  ext.action.setTitle({ title: ok ? "RDM" : `RDM — ${UNPAIRED_TEXT.toLowerCase()}` }).catch(() => {});
+  ext.action.setTitle({ title: ok ? "RDM" : `RDM — ${UNPAIRED_TEXT}` }).catch(() => {});
 }
 
-/** Tells RDM this browser is here (and asks for approval right away on Firefox). */
+/**
+ * Firefox: the connector vouches for this extension, so RDM accepts its random origin (the
+ * recording relay calls the bridge directly) without asking the user.
+ */
+async function pair() {
+  if (!globalThis.browser?.runtime?.getBrowserInfo) return;
+  const origin = new URL(ext.runtime.getURL("")).origin;
+  await native.request({ method: "POST", path: "/pair", body: { origin }, browser: await BROWSER }, 3000);
+}
+
+/** Tells RDM this browser is here (and asks for approval right away on Firefox without connector). */
 async function checkIn() {
+  await pair();
   await call("/ping", { method: "POST" });
   await appConfig(); // refreshes the cached capture list
 }
@@ -232,13 +346,13 @@ async function intercept(item) {
   if (sent === true) {
     await ext.downloads.cancel(item.id).catch(() => {});
     await ext.downloads.erase({ id: item.id }).catch(() => {});
-    toast(`✓ Envoyé à RDM : ${filename ?? nameOf(url)}`);
+    toast(t("sentName", filename ?? nameOf(url)));
   } else {
     await ext.downloads.resume(item.id).catch(() => {});
     if (sent === "unpaired") return toast(`✗ ${UNPAIRED_TEXT}`);
     // RDM closed since its last answer: say it once, then leave downloads alone until it is back.
     await forgetConfig();
-    toast("✗ RDM n'a pas répondu : le navigateur garde ce téléchargement");
+    toast(t("noAnswer"));
   }
 }
 
@@ -325,14 +439,14 @@ ext.runtime.onMessage.addListener((msg, sender, reply) => {
 ext.action.onClicked.addListener(async (tab) => {
   const res = await call("/show", { method: "POST" });
   if (res?.status === UNPAIRED) toast(`✗ ${UNPAIRED_TEXT}`, tab?.id);
-  else if (!answered(res)) toast("✗ RDM n'est pas lancé : ouvrez RDM, puis réessayez", tab?.id);
+  else if (!answered(res)) toast(t("notRunning"), tab?.id);
 });
 
 ext.contextMenus.onClicked.addListener(async ({ linkUrl, srcUrl, pageUrl, frameUrl }, tab) => {
   const url = linkUrl || srcUrl;
-  if (!isWeb(url)) return toast("✗ Ce lien ne se télécharge pas hors de la page (adresse non web)", tab?.id);
+  if (!isWeb(url)) return toast(t("notWeb"), tab?.id);
   const sent = await sendToApp({ url, referrer: frameUrl || pageUrl, topUrl: pageUrl, storeId: await storeOf(tab) });
-  const text = sent === true ? `✓ Envoyé à RDM : ${nameOf(url)}` : sent === "unpaired" ? `✗ ${UNPAIRED_TEXT}` : "✗ RDM n'est pas lancé : ouvrez RDM, puis réessayez";
+  const text = sent === true ? t("sentName", nameOf(url)) : sent === "unpaired" ? `✗ ${UNPAIRED_TEXT}` : t("notRunning");
   toast(text, tab?.id);
 });
 
@@ -345,7 +459,7 @@ ext.runtime.onInstalled.addListener(() => {
   start();
   ext.contextMenus
     .removeAll()
-    .then(() => ext.contextMenus.create({ id: "rdm", title: "Télécharger avec RDM", contexts: ["link", "video", "audio"] }));
+    .then(() => ext.contextMenus.create({ id: "rdm", title: t("menuDownload"), contexts: ["link", "video", "audio"] }));
 });
 ext.runtime.onStartup.addListener(start);
 ext.alarms.onAlarm.addListener(({ name }) => name === "rdm-check-in" && checkIn());

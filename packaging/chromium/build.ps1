@@ -1,6 +1,6 @@
 # Chromium flavour of the extension (Chrome, Brave, Opera, Edge, Vivaldi, Chromium):
 #   .\build.ps1 [-Out <dir>]  (default: target\chromium)
-# Same as build.sh: the folder loads as is ("Charger l'extension non empaquetée"), and
+# Same as build.sh: the folder loads as is ("Load unpacked"), and
 # rdm-chromium.zip next to it is that folder as one file. RDM itself installs the extension in one
 # click (the extension window) and keeps it up to date.
 param([string]$Out)

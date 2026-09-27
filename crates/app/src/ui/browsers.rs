@@ -15,6 +15,7 @@ use super::{
 use crate::{
     extension::{self, Browser, Flavour},
     manager::{Install, Installed},
+    tr, trf,
 };
 
 /// Heard from within this long: shown as connected.
@@ -46,8 +47,8 @@ impl App<'_> {
                 &p,
                 icon::PUZZLE_PIECE,
                 p.accent,
-                "Extension du navigateur",
-                "Capture les téléchargements et les vidéos des pages, et les envoie à RDM.",
+                tr!("Extension du navigateur", "Browser extension"),
+                tr!("Capture les téléchargements et les vidéos des pages, et les envoie à RDM.", "Captures downloads and videos from pages, and sends them to RDM."),
             );
             ui.add_space(14.0);
             // As tall as the window allows (see the settings dialog: without the minimum, the area
@@ -62,7 +63,11 @@ impl App<'_> {
                     ui,
                     icon::INFO,
                     p.faint,
-                    &format!("Extension {} · une seule pour Chrome, Brave, Opera, Edge et Chromium ; une pour Firefox et Waterfox.", extension::version()),
+                    &trf!(
+                        "Extension {} · une seule pour Chrome, Brave, Opera, Edge et Chromium ; une pour Firefox et Waterfox.",
+                        "Extension {} · one for Chrome, Brave, Opera, Edge and Chromium; one for Firefox and Waterfox.",
+                        extension::version()
+                    ),
                     p.faint,
                     12.0,
                 );
@@ -71,7 +76,7 @@ impl App<'_> {
         });
         if let Some(text) = copied {
             ctx.copy_text(text);
-            self.toasts.info(icon::COPY, "Chemin copié : collez-le avec Ctrl+V");
+            self.toasts.info(icon::COPY, tr!("Chemin copié : collez-le avec Ctrl+V", "Path copied: paste it with Ctrl+V"));
         }
         if Browser::ALL.into_iter().any(|b| matches!(self.manager.install_state(b), Some(Install::Working))) {
             self.animating = true; // spinner
@@ -93,10 +98,10 @@ impl App<'_> {
         let seen = self.manager.browser_last_seen(browser).map(|t| unix_now().saturating_sub(t));
         let install = self.manager.install_state(browser);
         let (status, color) = match (seen, exe) {
-            (Some(ago), _) if ago < LIVE_SECS => (format!("Connectée · dernier échange il y a {}", ago_text(ago)), p.success),
-            (Some(ago), _) => (format!("Installée · dernier échange il y a {}", ago_text(ago)), p.muted),
-            (None, Some(_)) => ("Détecté · extension pas encore installée".to_owned(), p.muted),
-            (None, None) => ("Non détecté sur cet ordinateur".to_owned(), p.faint),
+            (Some(ago), _) if ago < LIVE_SECS => (trf!("Connectée · dernier échange il y a {}", "Connected · last heard {} ago", ago_text(ago)), p.success),
+            (Some(ago), _) => (trf!("Installée · dernier échange il y a {}", "Installed · last heard {} ago", ago_text(ago)), p.muted),
+            (None, Some(_)) => (tr!("Détecté · extension pas encore installée", "Found · extension not installed yet").to_owned(), p.muted),
+            (None, None) => (tr!("Non détecté sur cet ordinateur", "Not found on this computer").to_owned(), p.faint),
         };
         Frame::new()
             .fill(if p.dark { p.bg.lerp_to_gamma(p.surface, 0.55) } else { p.raised })
@@ -121,9 +126,9 @@ impl App<'_> {
                         if matches!(install, Some(Install::Working)) {
                             let (r, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
                             widgets::spinner(ui.painter(), r.center(), 8.0, p.accent, ui.input(|i| i.time) as f32);
-                            ui.label(RichText::new("Préparation…").color(p.muted));
+                            ui.label(RichText::new(tr!("Préparation…", "Preparing…")).color(p.muted));
                         } else {
-                            let label = if seen.is_some() { "Réinstaller" } else { "Installer" };
+                            let label = if seen.is_some() { tr!("Réinstaller", "Reinstall") } else { tr!("Installer", "Install") };
                             let clicked = if seen.is_some() {
                                 ghost_button(ui, icon::ARROW_CLOCKWISE, label).clicked()
                             } else {
@@ -133,7 +138,7 @@ impl App<'_> {
                                 self.manager.install_extension(browser);
                                 *open = Some(browser);
                             }
-                            if install.is_some() && *open != Some(browser) && ghost_button(ui, icon::LIST_BULLETS, "Étapes").clicked() {
+                            if install.is_some() && *open != Some(browser) && ghost_button(ui, icon::LIST_BULLETS, tr!("Étapes", "Steps")).clicked() {
                                 *open = Some(browser);
                             }
                         }
@@ -160,57 +165,91 @@ impl App<'_> {
 fn steps(ui: &mut Ui, p: &Palette, browser: Browser, exe: Option<&Path>, done: &Installed, copied: &mut Option<String>) {
     let name = browser.name();
     // What "reopen" opens again: the page, or the package the browser was handed.
-    let mut reopen = (browser.extensions_page().to_owned(), "Rouvrir la page des extensions");
-    let opened = |what: &str| if done.launched { format!("{name} vient de s'ouvrir sur {what}.") } else { format!("Ouvrez {what} dans {name}.") };
+    let mut reopen = (browser.extensions_page().to_owned(), tr!("Rouvrir la page des extensions", "Reopen the extensions page"));
+    let opened = |what: &str| {
+        if done.launched { trf!("{name} vient de s'ouvrir sur {what}.", "{name} just opened {what}.") } else { trf!("Ouvrez {what} dans {name}.", "Open {what} in {name}.") }
+    };
+    let reopen_package = tr!("Rouvrir le paquet", "Reopen the package");
     match browser.flavour() {
         Flavour::Chromium => {
-            step(ui, p, 1, &format!("{} Activez le « Mode développeur » (interrupteur de la page).", opened(browser.extensions_page())));
-            step(ui, p, 2, "Cliquez sur « Charger l'extension non empaquetée » et choisissez ce dossier :");
+            let page = opened(browser.extensions_page());
+            step(ui, p, 1, &trf!("{page} Activez le « Mode développeur » (interrupteur de la page).", "{page} Turn on \"Developer mode\" (the page's switch)."));
+            step(ui, p, 2, tr!("Cliquez sur « Charger l'extension non empaquetée » et choisissez ce dossier :", "Click \"Load unpacked\" and choose this folder:"));
             path_row(ui, p, &done.folder, copied);
-            step(ui, p, 3, "L'icône RDM apparaît dans la barre d'outils : ce navigateur passe « Connectée » ici dès son premier échange.");
-            note(ui, p, "RDM tient ce dossier à jour : l'extension suit les nouvelles versions au prochain démarrage du navigateur. Ne le supprimez pas.");
+            step(
+                ui,
+                p,
+                3,
+                tr!(
+                    "L'icône RDM apparaît dans la barre d'outils : ce navigateur passe « Connectée » ici dès son premier échange.",
+                    "The RDM icon appears in the toolbar: this browser shows \"Connected\" here as soon as it first talks to RDM."
+                ),
+            );
+            note(
+                ui,
+                p,
+                tr!(
+                    "RDM tient ce dossier à jour : l'extension suit les nouvelles versions au prochain démarrage du navigateur. Ne le supprimez pas.",
+                    "RDM keeps this folder up to date: the extension follows new versions at the browser's next start. Do not delete it."
+                ),
+            );
         }
         Flavour::Firefox if done.signed => {
             let package = extension::base().join("rdm-firefox-signed.xpi");
             let first = if done.launched {
-                format!("{name} demande de confirmer l'ajout de « RDM » : cliquez sur « Ajouter ».")
+                trf!("{name} demande de confirmer l'ajout de « RDM » : cliquez sur « Ajouter ».", "{name} asks to confirm adding \"RDM\": click \"Add\".")
             } else {
-                format!("Ouvrez ce fichier avec {name}, puis cliquez sur « Ajouter » :")
+                trf!("Ouvrez ce fichier avec {name}, puis cliquez sur « Ajouter » :", "Open this file with {name}, then click \"Add\":")
             };
             step(ui, p, 1, &first);
             if !done.launched {
                 path_row(ui, p, &package, copied);
             }
-            step(ui, p, 2, &format!("Au premier échange, RDM vous demande d'autoriser cette installation de {name} : cliquez sur « Autoriser »."));
-            note(ui, p, "Version signée par Mozilla : installée pour de bon, mise à jour avec les versions de RDM.");
-            reopen = (package.to_string_lossy().into_owned(), "Rouvrir le paquet");
+            step(ui, p, 2, connects_itself());
+            note(ui, p, tr!("Version signée par Mozilla : installée pour de bon, mise à jour avec les versions de RDM.", "Signed by Mozilla: installed for good, updated with RDM's versions."));
+            reopen = (package.to_string_lossy().into_owned(), reopen_package);
         }
         // Waterfox installs an unsigned package for good (its signature check is off by default).
         Flavour::Firefox if browser == Browser::Waterfox && done.xpi.is_some() => {
             let xpi = done.xpi.as_deref().expect("checked");
             let first = if done.launched {
-                "Waterfox propose d'ajouter « RDM » : cliquez sur « Ajouter »."
+                tr!("Waterfox propose d'ajouter « RDM » : cliquez sur « Ajouter ».", "Waterfox offers to add \"RDM\": click \"Add\".")
             } else {
-                "Ouvrez ce fichier avec Waterfox (ou glissez-le dans sa fenêtre), puis cliquez sur « Ajouter » :"
+                tr!(
+                    "Ouvrez ce fichier avec Waterfox (ou glissez-le dans sa fenêtre), puis cliquez sur « Ajouter » :",
+                    "Open this file with Waterfox (or drop it into its window), then click \"Add\":"
+                )
             };
             step(ui, p, 1, first);
             if !done.launched {
                 path_row(ui, p, xpi, copied);
             }
-            step(ui, p, 2, "Au premier échange, RDM vous demande d'autoriser cette installation de Waterfox : cliquez sur « Autoriser ».");
-            note(ui, p, "Installée pour de bon. Après une mise à jour de RDM, réinstallez-la ici pour passer à sa nouvelle version.");
-            reopen = (xpi.to_string_lossy().into_owned(), "Rouvrir le paquet");
-        }
-        Flavour::Firefox => {
-            step(ui, p, 1, &format!("{} Cliquez sur « Charger un module complémentaire temporaire… ».", opened("about:debugging (« Ce Firefox »)")));
-            step(ui, p, 2, "Choisissez le fichier manifest.json de ce dossier :");
-            path_row(ui, p, &done.folder, copied);
-            step(ui, p, 3, "RDM vous demande alors d'autoriser l'extension : cliquez sur « Autoriser ».");
+            step(ui, p, 2, connects_itself());
             note(
                 ui,
                 p,
-                "Firefox n'installe durablement que les extensions signées par Mozilla : un module temporaire disparaît à la fermeture de Firefox. \
-                 Firefox Developer Edition, Nightly, ESR, Waterfox et LibreWolf installent durablement ce fichier :",
+                tr!(
+                    "Installée pour de bon. Après une mise à jour de RDM, réinstallez-la ici pour passer à sa nouvelle version.",
+                    "Installed for good. After an RDM update, reinstall it here to get its new version."
+                ),
+            );
+            reopen = (xpi.to_string_lossy().into_owned(), reopen_package);
+        }
+        Flavour::Firefox => {
+            let page = opened(tr!("about:debugging (« Ce Firefox »)", "about:debugging (\"This Firefox\")"));
+            step(ui, p, 1, &trf!("{page} Cliquez sur « Charger un module complémentaire temporaire… ».", "{page} Click \"Load Temporary Add-on…\"."));
+            step(ui, p, 2, tr!("Choisissez le fichier manifest.json de ce dossier :", "Choose the manifest.json file of this folder:"));
+            path_row(ui, p, &done.folder, copied);
+            step(ui, p, 3, connects_itself());
+            note(
+                ui,
+                p,
+                tr!(
+                    "Firefox n'installe durablement que les extensions signées par Mozilla : un module temporaire disparaît à la fermeture de Firefox. \
+                     Firefox Developer Edition, Nightly, ESR, Waterfox et LibreWolf installent durablement ce fichier :",
+                    "Firefox only keeps extensions signed by Mozilla: a temporary add-on goes away when Firefox closes. \
+                     Firefox Developer Edition, Nightly, ESR, Waterfox and LibreWolf keep this file installed for good:"
+                ),
             );
             if let Some(xpi) = &done.xpi {
                 path_row(ui, p, xpi, copied);
@@ -224,6 +263,15 @@ fn steps(ui: &mut Ui, p: &Palette, browser: Browser, exe: Option<&Path>, done: &
             let _ = extension::launch(exe, &target);
         }
     }
+}
+
+/// The extension reaches RDM through the connector RDM registered with the browser; only when the
+/// browser cannot start it (a sandboxed Flatpak or Snap browser) does RDM ask for approval.
+fn connects_itself() -> &'static str {
+    tr!(
+        "L'extension se connecte seule à RDM. Si RDM vous demande d'autoriser cette installation, cliquez sur « Autoriser ».",
+        "The extension connects to RDM by itself. If RDM asks you to allow this installation, click \"Allow\"."
+    )
 }
 
 fn step(ui: &mut Ui, p: &Palette, n: u32, text: &str) {
@@ -253,11 +301,11 @@ fn path_row(ui: &mut Ui, p: &Palette, path: &Path, copied: &mut Option<String>) 
                 ui.add(Label::new(RichText::new(&text).monospace().color(p.text)).truncate()).on_hover_text(&text);
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if widgets::icon_button(ui, icon::FOLDER_OPEN, "Afficher dans le dossier", None).clicked() {
+                if widgets::icon_button(ui, icon::FOLDER_OPEN, tr!("Afficher dans le dossier", "Show in folder"), None).clicked() {
                     // Selects the item: a folder opens in its parent with it highlighted.
                     reveal_file(path.to_path_buf());
                 }
-                if widgets::icon_button(ui, icon::COPY, "Copier le chemin", None).clicked() {
+                if widgets::icon_button(ui, icon::COPY, tr!("Copier le chemin", "Copy the path"), None).clicked() {
                     *copied = Some(text.clone());
                 }
             });
@@ -266,13 +314,13 @@ fn path_row(ui: &mut Ui, p: &Palette, path: &Path, copied: &mut Option<String>) 
     ui.add_space(6.0);
 }
 
-/// "3 min", "2 h", "4 j".
+/// "3 min", "2 h", "4 d".
 fn ago_text(secs: u64) -> String {
     match secs {
-        0..60 => "moins d'une minute".to_owned(),
+        0..60 => tr!("moins d'une minute", "less than a minute").to_owned(),
         60..3600 => format!("{} min", secs / 60),
         3600..86_400 => format!("{} h", secs / 3600),
-        _ => format!("{} j", secs / 86_400),
+        _ => trf!("{} j", "{} d", secs / 86_400),
     }
 }
 
@@ -301,21 +349,21 @@ pub(super) fn card(ui: &mut Ui, p: &Palette, (connected, installed): (Vec<Browse
     painter.rect_filled(tile, 10, p.tint(color, 0.16));
     painter.text(tile.center(), eframe::egui::Align2::CENTER_CENTER, icon::PUZZLE_PIECE, theme::regular(18.0), color);
     let x = tile.right() + 12.0;
-    painter.text(eframe::egui::pos2(x, rect.top() + 19.0), eframe::egui::Align2::LEFT_CENTER, "Extension navigateur", theme::regular(12.0), p.muted);
+    painter.text(eframe::egui::pos2(x, rect.top() + 19.0), eframe::egui::Align2::LEFT_CENTER, tr!("Extension navigateur", "Browser extension"), theme::regular(12.0), p.muted);
     let names = |list: &[Browser]| match list {
         [] => String::new(),
         [one] => one.name().to_owned(),
         [one, rest @ ..] => format!("{} +{}", one.name(), rest.len()),
     };
     let value = match (connected.is_empty(), installed.is_empty()) {
-        (false, _) => format!("Connectée · {}", names(&connected)),
-        (true, false) => format!("Installée · {}", names(&installed)),
-        (true, true) => "À installer".to_owned(),
+        (false, _) => trf!("Connectée · {}", "Connected · {}", names(&connected)),
+        (true, false) => trf!("Installée · {}", "Installed · {}", names(&installed)),
+        (true, true) => tr!("À installer", "Not installed").to_owned(),
     };
     let galley = painter.layout_no_wrap(value, theme::semibold(13.0), p.text);
     let clip = eframe::egui::Rect::from_min_max(eframe::egui::pos2(x, rect.top()), eframe::egui::pos2(rect.right() - 8.0, rect.bottom()));
     painter.with_clip_rect(clip).galley(eframe::egui::pos2(x, rect.top() + 39.0 - galley.size().y / 2.0), galley, p.text);
-    response.on_hover_text("Installer ou vérifier l'extension").clicked()
+    response.on_hover_text(tr!("Installer ou vérifier l'extension", "Install or check the extension")).clicked()
 }
 
 /// Browsers heard from recently (the extension checks in every few minutes while the browser

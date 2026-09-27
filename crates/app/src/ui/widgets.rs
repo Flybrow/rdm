@@ -13,24 +13,26 @@ use eframe::egui::{
 
 use super::theme::{self, Palette};
 
-// ── Numbers, the French way ──────────────────────────────────────────────
+// ── Numbers, in the interface language ───────────────────────────────────
 pub fn bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["o", "Ko", "Mo", "Go", "To"];
+    let units: [&str; 5] = if crate::i18n::english() { ["B", "KB", "MB", "GB", "TB"] } else { ["o", "Ko", "Mo", "Go", "To"] };
     let mut v = n as f64;
     let mut unit = 0;
-    while v >= 1024.0 && unit < UNITS.len() - 1 {
+    while v >= 1024.0 && unit < units.len() - 1 {
         v /= 1024.0;
         unit += 1;
     }
-    if unit == 0 { format!("{n} o") } else { format!("{} {}", decimal(v), UNITS[unit]) }
+    if unit == 0 { format!("{n} {}", units[0]) } else { format!("{} {}", decimal(v), units[unit]) }
 }
 
 pub fn speed(bytes_per_sec: f64) -> String {
     format!("{}/s", bytes(bytes_per_sec.max(0.0) as u64))
 }
 
+/// One decimal: `1,5` in French, `1.5` in English.
 fn decimal(v: f64) -> String {
-    format!("{v:.1}").replace('.', ",")
+    let text = format!("{v:.1}");
+    if crate::i18n::english() { text } else { text.replace('.', ",") }
 }
 
 pub fn duration(secs: u64) -> String {
@@ -204,7 +206,7 @@ pub fn icon_text(ui: &mut Ui, glyph: &str, glyph_color: Color32, text: &str, tex
     ui.label(job)
 }
 
-/// `CATÉGORIES`-style section label.
+/// `CATEGORIES`-style section label.
 pub fn caption(ui: &mut Ui, text: &str) {
     let p = Palette::of(ui);
     ui.label(RichText::new(text).font(theme::semibold(10.5)).color(p.faint).extra_letter_spacing(1.0));
@@ -272,15 +274,16 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str, detail: &str) -> Response
 /// Pick one of a few options (theme): a sunken track, the chosen option raised.
 pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str, &str)]) -> bool {
     let p = Palette::of(ui);
-    let width = ui.available_width().min(420.0);
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
+    let width = ui.available_width().min(140.0 * options.len() as f32);
+    // Its own (automatic, unique) id: several selectors in one panel must not share their cells'.
+    let (rect, own) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
     let track = if p.dark { p.bg } else { p.border.lerp_to_gamma(p.raised, 0.35) };
     ui.painter().rect_filled(rect, 12, track);
     let slot = (rect.width() - 8.0) / options.len() as f32;
     let mut changed = false;
     for (i, (option, glyph, label)) in options.iter().enumerate() {
         let cell = Rect::from_min_size(pos2(rect.left() + 4.0 + slot * i as f32, rect.top() + 4.0), vec2(slot, rect.height() - 8.0));
-        let response = ui.interact(cell, ui.id().with(("segment", i)), Sense::click());
+        let response = ui.interact(cell, own.id.with(("segment", i)), Sense::click());
         if response.clicked() && *value != *option {
             *value = *option;
             changed = true;
@@ -396,6 +399,10 @@ mod tests {
 
     #[test]
     fn formats() {
+        let _one_at_a_time = crate::i18n::TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::i18n::set(crate::i18n::Language::English);
+        assert_eq!(bytes(1536), "1.5 KB");
+        crate::i18n::set(crate::i18n::Language::French);
         assert_eq!(bytes(512), "512 o");
         assert_eq!(bytes(1536), "1,5 Ko");
         assert_eq!(speed(3.5 * 1024.0 * 1024.0), "3,5 Mo/s");

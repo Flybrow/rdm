@@ -1,32 +1,65 @@
 //! Updates from the project's GitHub releases: one request to the GitHub API (at start, then daily,
-//! or on demand), nothing else. Elsewhere than on Windows the release page is opened.
+//! or on demand), nothing else. Installing is silent and done from RDM itself, whatever the
+//! system, and RDM is never left closed with nothing happening:
 //!
-//! Windows installs in place, built so that RDM is never left closed with nothing happening:
-//! 1. the installer (`.msi`, per-user: no administrator prompt) is downloaded from GitHub only,
-//!    with retries, then checked — size and SHA-256 published by GitHub, MSI file signature;
-//! 2. a copy of `rdm.exe` is started as the installation assistant (a copy: the installed file
-//!    must stay free for the installer to replace), and RDM quits;
-//! 3. the assistant waits until RDM is really gone (and ends it if it hangs), runs `msiexec`
-//!    (progress bar, log file), then makes sure RDM runs again — the new version, or the old one
-//!    after saying why the installation failed.
+//! 1. the package matching how this RDM was installed is downloaded from GitHub only (with
+//!    retries), then checked: size and SHA-256 published by GitHub, the file's own format, and an
+//!    **Ed25519 signature** made by the release workflow with a key only it holds — a tampered
+//!    or substituted package (even through a compromised GitHub account) is refused;
+//! 2. it is installed:
+//!    - **Windows** (`.msi`, per user: no administrator prompt): a copy of `rdm.exe` is started as
+//!      the installation assistant (the installed file must stay free to be replaced) and RDM
+//!      quits; the assistant waits until RDM is really gone, runs `msiexec` without any window,
+//!      then makes sure RDM runs again — the new version, or the old one after saying why the
+//!      installation failed;
+//!    - **Linux, RDM in the user's folders** (`install.sh`, the tarball): the binary is replaced in
+//!      place, and RDM restarts;
+//!    - **Linux, `.deb` / `.rpm`**: the package manager installs it after the system's password
+//!      prompt (polkit), and RDM restarts.
 //!
-//! No PowerShell: RDM 0.1 and 0.2 started it without a console, which PowerShell 5.1 silently
-//! refuses to run in — RDM closed and nothing was installed. Their installer asset names end
-//! with `x64.msi`; installers are now named `…-x64-setup.msi`, which those versions do not
-//! recognise: they offer the release page instead of closing for nothing.
+//! No PowerShell: RDM 0.1 and 0.2.0 started it without a console, which PowerShell 5.1 silently
+//! refuses to run in. They look for an installer named `…x64.msi`; installers are named
+//! `…-x64-setup.msi` since 0.2.1, which they do not recognise: they offer the release page
+//! instead. RDM 0.2.1 recognises it and installs it with its own assistant (no signature check:
+//! it predates them); signatures are required from 0.3.0 on.
 
 use std::{
     path::{Path, PathBuf},
+    sync::OnceLock,
     time::Duration,
 };
 
 use serde::Deserialize;
+
+use crate::tr;
 
 /// `owner/repo`, from `repository` in Cargo.toml: the single source for where releases live.
 pub fn repo() -> Option<&'static str> {
     let url = env!("CARGO_PKG_REPOSITORY");
     let path = url.strip_prefix("https://github.com/")?.trim_end_matches('/');
     (path.split('/').count() == 2 && !path.contains("OWNER")).then_some(path)
+}
+
+/// Public half of the key the release workflow signs packages with (Ed25519, raw 32 bytes).
+const PUBLIC_KEY: [u8; 32] = hex32("a972e3ab906c230c0e1c96b750e0c7d2abeae96c5979f9c48085853506b9b135");
+
+const fn hex32(s: &str) -> [u8; 32] {
+    const fn nibble(c: u8) -> u8 {
+        match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            _ => panic!("bad hex"),
+        }
+    }
+    let b = s.as_bytes();
+    assert!(b.len() == 64);
+    let mut out = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        out[i] = nibble(b[2 * i]) << 4 | nibble(b[2 * i + 1]);
+        i += 1;
+    }
+    out
 }
 
 /// What the UI shows about updates.
@@ -38,9 +71,9 @@ pub enum State {
     UpToDate,
     Available(Release),
     Downloading(f32),
-    /// The installer is ready: RDM is closing to let it run.
+    /// The package is ready: RDM is closing to let it install.
     Installing,
-    /// Downloading or starting the installer failed: the update stays on offer.
+    /// Downloading or installing failed: the update stays on offer.
     InstallFailed(Release, String),
     Failed(String),
 }
@@ -65,17 +98,20 @@ pub struct Release {
     pub version: String,
     pub page: String,
     pub notes: String,
-    /// Windows installer asset, if the release has one.
-    pub msi: Option<Installer>,
+    /// The package that updates this RDM, if the release has it.
+    pub package: Option<Package>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Installer {
+pub struct Package {
+    pub name: String,
     pub url: String,
     /// Size announced by GitHub (0 = unknown).
     pub size: u64,
     /// SHA-256 computed by GitHub when the asset was uploaded (lower-case hex), if published.
     pub sha256: Option<String>,
+    /// The detached Ed25519 signature (`<name>.sig`), if the release has one.
+    pub signature: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -115,33 +151,148 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
     matches!((parse(candidate), parse(current)), (Some(a), Some(b)) if a > b)
 }
 
-/// The Windows installer among a release's assets.
-fn installer(assets: &[Asset]) -> Option<Installer> {
-    let asset = assets.iter().find(|a| {
-        let name = a.name.to_ascii_lowercase();
-        name.ends_with(".msi") && name.contains("x64")
-    })?;
-    let sha256 = asset.digest.as_deref().and_then(|d| d.strip_prefix("sha256:")).map(str::to_ascii_lowercase);
-    Some(Installer { url: asset.browser_download_url.clone(), size: asset.size, sha256 })
+// ── How this RDM was installed ─────────────────────────────────────────────
+
+/// How this copy of RDM was installed, hence which package updates it.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code, reason = "the Linux methods are detected on Linux only"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    /// Windows installer (per user, `%LOCALAPPDATA%\Programs\RDM`).
+    Msi,
+    /// Linux binary in a folder the user can write (`~/.local/bin`, the tarball).
+    Binary,
+    /// Linux, installed by a package manager.
+    Deb,
+    Rpm,
+    /// A copy RDM cannot update itself (a build folder, a USB stick…): the page is opened.
+    Manual,
 }
 
+static EXE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Remembers the executable RDM started from: after an in-place update the running file is gone
+/// (Linux then reports `…/rdm (deleted)`), and the restart must use the path, not the process.
+pub fn remember_exe() {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = EXE.set(std::fs::canonicalize(&exe).unwrap_or(exe));
+    }
+}
+
+fn startup_exe() -> Option<&'static Path> {
+    EXE.get().map(PathBuf::as_path)
+}
+
+pub fn method() -> Method {
+    static METHOD: OnceLock<Method> = OnceLock::new();
+    *METHOD.get_or_init(detect)
+}
+
+/// RDM installs this release itself (silently); otherwise its page is opened.
+pub fn installs_itself(release: &Release) -> bool {
+    release.package.is_some() && method() != Method::Manual
+}
+
+#[cfg(windows)]
+fn detect() -> Method {
+    let (Some(installed), Some(me)) = (installed_exe(), startup_exe()) else { return Method::Manual };
+    let norm = |p: &Path| std::fs::canonicalize(p).map(|p| p.to_string_lossy().to_lowercase());
+    if matches!((norm(&installed), norm(me)), (Ok(a), Ok(b)) if a == b) { Method::Msi } else { Method::Manual }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn detect() -> Method {
+    let Some(exe) = startup_exe() else { return Method::Manual };
+    let succeeds = |program: &str, args: &[&std::ffi::OsStr]| {
+        std::process::Command::new(program)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    if exe.starts_with("/usr/") || exe.starts_with("/opt/") {
+        let has_pkexec = which("pkexec").is_some();
+        if has_pkexec && succeeds("dpkg-query", &["-S".as_ref(), exe.as_os_str()]) {
+            return Method::Deb;
+        }
+        if has_pkexec && succeeds("rpm", &["-qf".as_ref(), exe.as_os_str()]) {
+            return Method::Rpm;
+        }
+        return Method::Manual;
+    }
+    if writable(exe) { Method::Binary } else { Method::Manual }
+}
+
+#[cfg(not(any(windows, all(target_os = "linux", target_arch = "x86_64"))))]
+fn detect() -> Method {
+    Method::Manual
+}
+
+#[cfg(target_os = "linux")]
+fn writable(exe: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let access = |p: &Path| {
+        let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else { return false };
+        // SAFETY: a valid NUL-terminated path; `access` only reads it.
+        unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+    };
+    access(exe) && exe.parent().is_some_and(access)
+}
+
+#[cfg(target_os = "linux")]
+fn which(program: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .chain([PathBuf::from("/usr/bin"), PathBuf::from("/usr/sbin"), PathBuf::from("/bin")])
+        .map(|d| d.join(program))
+        .find(|p| p.is_file())
+}
+
+/// Whether a release asset is the package for `method`.
+fn wanted(method: Method, name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    match method {
+        Method::Msi => name.ends_with(".msi") && name.contains("x64"),
+        Method::Binary => name == "rdm-linux-x64.tar.gz",
+        Method::Deb => name.ends_with("_amd64.deb"),
+        Method::Rpm => name.ends_with(".x86_64.rpm"),
+        Method::Manual => false,
+    }
+}
+
+/// The package for `method`, once both it and its signature are online (the release workflow
+/// uploads them one after the other: in between, the release is looked at again later).
+fn package(assets: &[Asset], method: Method) -> Option<Package> {
+    let asset = assets.iter().find(|a| wanted(method, &a.name))?;
+    let sha256 = asset.digest.as_deref().and_then(|d| d.strip_prefix("sha256:")).map(str::to_ascii_lowercase);
+    let sig_name = format!("{}.sig", asset.name);
+    let signature = assets.iter().find(|a| a.name == sig_name).map(|a| a.browser_download_url.clone())?;
+    Some(Package { name: asset.name.clone(), url: asset.browser_download_url.clone(), size: asset.size, sha256, signature: Some(signature) })
+}
+
+// ── Checking ───────────────────────────────────────────────────────────────
+
 async fn latest(client: &reqwest::Client) -> Result<Option<ApiRelease>, String> {
-    let repo = repo().ok_or("dépôt GitHub non configuré")?;
+    let repo = repo().ok_or_else(|| tr!("dépôt GitHub non configuré", "GitHub repository not configured").to_owned())?;
+    let unreachable = || tr!("GitHub est injoignable", "GitHub cannot be reached").to_owned();
     let res = client
         .get(format!("https://api.github.com/repos/{repo}/releases/latest"))
         .header("accept", "application/vnd.github+json")
         .timeout(Duration::from_secs(20))
         .send()
         .await
-        .map_err(|_| "GitHub est injoignable".to_owned())?;
+        .map_err(|_| unreachable())?;
     if res.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None); // no release published yet
     }
     if !res.status().is_success() {
-        return Err(format!("GitHub a répondu {}", res.status().as_u16()));
+        let status = res.status().as_u16();
+        return Err(crate::trf!("GitHub a répondu {status}", "GitHub answered {status}"));
     }
-    let body = res.bytes().await.map_err(|_| "GitHub est injoignable".to_owned())?;
-    let r: ApiRelease = serde_json::from_slice(&body).map_err(|_| "réponse inattendue de GitHub".to_owned())?;
+    let body = res.bytes().await.map_err(|_| unreachable())?;
+    let r: ApiRelease = serde_json::from_slice(&body).map_err(|_| tr!("réponse inattendue de GitHub", "unexpected answer from GitHub").to_owned())?;
     Ok((!r.draft && !r.prerelease).then_some(r))
 }
 
@@ -155,7 +306,7 @@ pub async fn check(client: &reqwest::Client) -> Result<Option<Release>, String> 
         version: r.tag_name.trim_start_matches(['v', 'V']).to_owned(),
         page: r.html_url,
         notes: r.body.unwrap_or_default(),
-        msi: installer(&r.assets),
+        package: package(&r.assets, method()),
     }))
 }
 
@@ -163,7 +314,7 @@ pub async fn check(client: &reqwest::Client) -> Result<Option<Release>, String> 
 const TRUSTED: [&str; 3] = ["https://github.com/", "https://objects.githubusercontent.com/", "https://release-assets.githubusercontent.com/"];
 const FIREFOX_XPI: &str = "rdm-firefox.xpi";
 const MAX_XPI: u64 = 20 << 20;
-const MAX_MSI: u64 = 200 << 20;
+const MAX_PACKAGE: u64 = 200 << 20;
 /// A download that receives nothing for this long is retried.
 const STALL: Duration = Duration::from_secs(45);
 const DOWNLOAD_ATTEMPTS: u32 = 4;
@@ -184,17 +335,18 @@ pub async fn signed_firefox_xpi(client: &reqwest::Client, dest: &Path) -> Result
     if !trusted(&asset.browser_download_url) {
         return Ok(false);
     }
+    let failed = || tr!("téléchargement de l'extension impossible", "cannot download the extension").to_owned();
     let res = client
         .get(&asset.browser_download_url)
         .timeout(Duration::from_secs(60))
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .map_err(|_| "téléchargement de l'extension impossible".to_owned())?;
+        .map_err(|_| failed())?;
     if res.content_length().is_some_and(|n| n > MAX_XPI) {
         return Ok(false);
     }
-    let bytes = res.bytes().await.map_err(|_| "téléchargement de l'extension interrompu".to_owned())?;
+    let bytes = res.bytes().await.map_err(|_| failed())?;
     // Mozilla's signature files: without them release Firefox refuses the package.
     let signed = |marker: &[u8]| bytes.windows(marker.len()).any(|w| w == marker);
     if bytes.len() as u64 > MAX_XPI || !(signed(b"META-INF/mozilla.rsa") || signed(b"META-INF/cose.sig")) {
@@ -209,19 +361,29 @@ pub async fn signed_firefox_xpi(client: &reqwest::Client, dest: &Path) -> Result
     Ok(true)
 }
 
-/// Downloads and checks the installer of `version`; `progress` gets the fraction done.
-pub async fn download(client: &reqwest::Client, version: &str, installer: &Installer, progress: impl Fn(f32)) -> Result<PathBuf, String> {
-    if !trusted(&installer.url) {
-        return Err("adresse de téléchargement inattendue".into());
+// ── Downloading and checking ──────────────────────────────────────────────
+
+/// Downloads `package` of `version` and checks it (size, SHA-256, format, signature);
+/// `progress` gets the fraction done.
+pub async fn download(client: &reqwest::Client, version: &str, package: &Package, progress: impl Fn(f32)) -> Result<PathBuf, String> {
+    if !trusted(&package.url) {
+        return Err(tr!("adresse de téléchargement inattendue", "unexpected download address").into());
     }
+    let Some(sig_url) = package.signature.as_deref().filter(|u| trusted(u)) else {
+        return Err(tr!("mise à jour non signée : installation refusée", "unsigned update: installation refused").into());
+    };
+    let signature = fetch_small(client, sig_url).await?;
     let safe: String = version.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-')).collect();
-    let path = std::env::temp_dir().join(format!("rdm-update-{safe}.msi"));
+    let extension = package.name.rsplit_once('.').map_or("bin", |(_, e)| e);
+    let extension = if package.name.ends_with(".tar.gz") { "tar.gz" } else { extension };
+    let dir = work_dir().map_err(|e| e.to_string())?;
+    let path = dir.join(format!("rdm-update-{safe}.{extension}"));
     let mut last = String::new();
     for attempt in 0..DOWNLOAD_ATTEMPTS {
         if attempt > 0 {
             tokio::time::sleep(Duration::from_secs(2 << attempt)).await;
         }
-        let result = fetch(client, installer, &path, &progress).await;
+        let result = fetch(client, version, package, &path, &signature, &progress).await;
         if result.is_err() {
             let _ = tokio::fs::remove_file(crate::settings::with_suffix(&path, ".tmp")).await;
         }
@@ -234,71 +396,126 @@ pub async fn download(client: &reqwest::Client, version: &str, installer: &Insta
     Err(last)
 }
 
+/// A small file (a signature), with retries.
+async fn fetch_small(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
+    for attempt in 0..DOWNLOAD_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(2 << attempt)).await;
+        }
+        let res = client.get(url).timeout(Duration::from_secs(30)).send().await.and_then(reqwest::Response::error_for_status);
+        if let Ok(res) = res
+            && let Ok(bytes) = res.bytes().await
+            && bytes.len() <= 1024
+        {
+            return Ok(bytes.to_vec());
+        }
+    }
+    Err(tr!("signature de la mise à jour introuvable", "cannot fetch the update's signature").into())
+}
+
 enum Failure {
     Retry(String),
     Fatal(String),
 }
 use Failure::{Fatal, Retry};
 
-async fn fetch(client: &reqwest::Client, installer: &Installer, path: &Path, progress: &impl Fn(f32)) -> Result<(), Failure> {
+async fn fetch(client: &reqwest::Client, version: &str, package: &Package, path: &Path, signature: &[u8], progress: &impl Fn(f32)) -> Result<(), Failure> {
     use futures_util::StreamExt;
     use sha2::{Digest, Sha256};
     use tokio::io::AsyncWriteExt;
 
-    let res = client.get(&installer.url).send().await.map_err(|_| Retry("GitHub est injoignable".into()))?;
+    let res = client.get(&package.url).send().await.map_err(|_| Retry(tr!("GitHub est injoignable", "GitHub cannot be reached").into()))?;
     if !res.status().is_success() {
-        let status = res.status();
-        let reason = format!("téléchargement refusé par GitHub ({})", status.as_u16());
-        return Err(if status.is_server_error() || status.as_u16() == 429 { Retry(reason) } else { Fatal(reason) });
+        let status = res.status().as_u16();
+        let reason = crate::trf!("téléchargement refusé par GitHub ({status})", "download refused by GitHub ({status})");
+        return Err(if res.status().is_server_error() || status == 429 { Retry(reason) } else { Fatal(reason) });
     }
-    let total = if installer.size > 0 { installer.size } else { res.content_length().unwrap_or(0) };
-    if total > MAX_MSI {
-        return Err(Fatal("installateur anormalement gros".into()));
+    let too_big = || Fatal(tr!("paquet anormalement gros", "abnormally large package").into());
+    let total = if package.size > 0 { package.size } else { res.content_length().unwrap_or(0) };
+    if total > MAX_PACKAGE {
+        return Err(too_big());
     }
     let tmp = crate::settings::with_suffix(path, ".tmp");
-    let io = |e: std::io::Error| Fatal(format!("écriture impossible : {e}"));
+    let io = |e: std::io::Error| Fatal(crate::trf!("écriture impossible : {e}", "cannot write: {e}"));
     let mut file = tokio::fs::File::create(&tmp).await.map_err(io)?;
-    let (mut stream, mut done, mut hash) = (res.bytes_stream(), 0u64, Sha256::new());
+    // Streamed to disk: only the first bytes (the format) and the running hash stay in memory.
+    let (mut stream, mut head, mut received, mut hash) = (res.bytes_stream(), Vec::with_capacity(16), 0u64, Sha256::new());
     loop {
         let chunk = match tokio::time::timeout(STALL, stream.next()).await {
-            Err(_) => return Err(Retry("téléchargement bloqué (connexion)".into())),
+            Err(_) => return Err(Retry(tr!("téléchargement bloqué (connexion)", "download stalled (connection)").into())),
             Ok(None) => break,
-            Ok(Some(Err(_))) => return Err(Retry("téléchargement interrompu".into())),
+            Ok(Some(Err(_))) => return Err(Retry(tr!("téléchargement interrompu", "download interrupted").into())),
             Ok(Some(Ok(chunk))) => chunk,
         };
-        done += chunk.len() as u64;
-        if done > MAX_MSI {
-            return Err(Fatal("installateur anormalement gros".into()));
+        received += chunk.len() as u64;
+        if received > MAX_PACKAGE {
+            return Err(too_big());
+        }
+        if head.len() < 16 {
+            head.extend_from_slice(&chunk[..chunk.len().min(16 - head.len())]);
         }
         hash.update(&chunk);
         file.write_all(&chunk).await.map_err(io)?;
         if total > 0 {
-            progress((done as f32 / total as f32).min(1.0));
+            progress((received as f32 / total as f32).min(1.0));
         }
     }
     file.sync_all().await.map_err(io)?;
     drop(file);
 
-    if total > 0 && done != total {
-        return Err(Retry("installateur incomplet".into()));
+    if total > 0 && received != total {
+        return Err(Retry(tr!("paquet incomplet", "incomplete package").into()));
     }
     let digest: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
-    if installer.sha256.as_ref().is_some_and(|expected| *expected != digest) {
-        return Err(Retry("installateur corrompu (empreinte SHA-256 différente)".into()));
+    if package.sha256.as_ref().is_some_and(|expected| *expected != digest) {
+        return Err(Retry(tr!("paquet corrompu (empreinte SHA-256 différente)", "corrupted package (SHA-256 mismatch)").into()));
     }
-    let mut head = [0u8; 8];
-    let read = std::fs::File::open(&tmp).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head));
-    // Every .msi is an OLE compound file.
-    if read.is_err() || head != [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1] {
-        return Err(Retry("le fichier reçu n'est pas un installateur".into()));
+    if !format_matches(&package.name, &head) {
+        return Err(Retry(tr!("le fichier reçu n'est pas le paquet attendu", "the file received is not the expected package").into()));
+    }
+    if !signature_valid(signed_statement(version, &package.name, &digest).as_bytes(), signature) {
+        return Err(Fatal(tr!("signature de la mise à jour invalide : installation refusée", "invalid update signature: installation refused").into()));
     }
     tokio::fs::rename(&tmp, path).await.map_err(io)
 }
 
+/// The package's own format, from its first bytes.
+fn format_matches(name: &str, data: &[u8]) -> bool {
+    let name = name.to_ascii_lowercase();
+    let magic: &[u8] = if name.ends_with(".msi") {
+        &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1] // OLE compound file
+    } else if name.ends_with(".tar.gz") {
+        &[0x1F, 0x8B]
+    } else if name.ends_with(".deb") {
+        b"!<arch>\n"
+    } else if name.ends_with(".rpm") {
+        &[0xED, 0xAB, 0xEE, 0xDB]
+    } else {
+        return false;
+    };
+    data.starts_with(magic)
+}
+
+/// What the release workflow signs for each package (`.github/workflows/release.yml`): the version
+/// it belongs to, its name and its SHA-256. Binding the version defeats replays: an older signed
+/// package (with a since-fixed flaw) cannot be served again as a newer release.
+fn signed_statement(version: &str, name: &str, sha256: &str) -> String {
+    format!("rdm-update\nversion={version}\nname={name}\nsha256={sha256}\n")
+}
+
+/// Ed25519 signature of `message` by the release key.
+fn signature_valid(message: &[u8], signature: &[u8]) -> bool {
+    use ed25519_dalek::{Signature, VerifyingKey};
+    let (Ok(key), Ok(sig)) = (VerifyingKey::from_bytes(&PUBLIC_KEY), <[u8; 64]>::try_from(signature)) else { return false };
+    key.verify_strict(message, &Signature::from_bytes(&sig)).is_ok()
+}
+
+// ── Installing ─────────────────────────────────────────────────────────────
+
 /// The command-line flag of the installation assistant: `rdm --apply-update <msi> <pid> <exe>`.
 pub const HELPER_FLAG: &str = "--apply-update";
 
-/// Where the installer puts RDM (per user).
+/// Where the Windows installer puts RDM (per user).
 pub fn installed_exe() -> Option<PathBuf> {
     #[cfg(windows)]
     {
@@ -310,25 +527,28 @@ pub fn installed_exe() -> Option<PathBuf> {
     }
 }
 
-/// RDM can install updates itself: Windows, and this is the copy the installer manages (a copy
-/// run from a build folder or a USB stick would not be the one replaced). Computed once.
-pub fn can_self_install() -> bool {
-    static CAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CAN.get_or_init(|| {
-        let (Some(installed), Ok(me)) = (installed_exe(), std::env::current_exe()) else { return false };
-        let norm = |p: &Path| std::fs::canonicalize(p).map(|p| p.to_string_lossy().to_lowercase());
-        matches!((norm(&installed), norm(&me)), (Ok(a), Ok(b)) if a == b)
-    })
-}
-
-/// Starts the installation assistant for `msi` (see the module docs). The caller quits right after.
+/// Windows: starts the installation assistant for `msi` (see the module docs). The caller quits
+/// right after.
 pub fn start_installation(msi: &Path) -> std::io::Result<()> {
     let target = installed_exe().ok_or(std::io::ErrorKind::Unsupported)?;
     let helper = std::env::temp_dir().join(format!("rdm-updater-{}.exe", std::process::id()));
-    std::fs::copy(std::env::current_exe()?, &helper)?;
+    std::fs::copy(startup_exe().map_or_else(std::env::current_exe, |p| Ok(p.to_path_buf()))?, &helper)?;
     let mut command = std::process::Command::new(&helper);
     command.arg(HELPER_FLAG).arg(msi).arg(std::process::id().to_string()).arg(&target);
     imp::spawn_outliving(&mut command)
+}
+
+/// Linux: installs the downloaded package (binary replaced in place, or the package manager behind
+/// the system's password prompt). RDM restarts afterwards.
+pub async fn install_linux(package: PathBuf) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || linux::install(method(), &package)).await.map_err(|e| e.to_string())?
+}
+
+/// After quitting for an update: starts the (new) RDM from where it was installed.
+pub fn relaunch() {
+    if let Some(exe) = startup_exe() {
+        let _ = std::process::Command::new(exe).spawn();
+    }
 }
 
 /// In the assistant: `true` when `args` asked for it (it then did its job).
@@ -341,20 +561,115 @@ pub fn run_assistant(args: &[String]) -> bool {
     true
 }
 
-/// At start: leftovers of a previous update (installer, assistant copy, old logs). Files still in
+/// Where update packages are downloaded: the user's own temporary folder on Windows; on Linux a
+/// private folder (`~/.cache/rdm`, 0700) rather than the shared `/tmp`, where another account
+/// could prepare a file or a link under the expected name.
+fn work_dir() -> std::io::Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let dir = directories::BaseDirs::new().ok_or(std::io::ErrorKind::NotFound)?.cache_dir().join("rdm");
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        Ok(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(std::env::temp_dir())
+    }
+}
+
+/// At start: leftovers of a previous update (package, assistant copy, old logs). Files still in
 /// use (an assistant finishing its job) are left for next time.
 pub fn clean_leftovers() {
-    let Ok(dir) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    let Ok(dir) = work_dir().and_then(std::fs::read_dir) else { return };
     let week = Duration::from_secs(7 * 24 * 3600);
     for entry in dir.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let old = || entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age > week));
+        let update = name.starts_with("rdm-update-");
         let leftover = name.starts_with("rdm-updater-") && name.ends_with(".exe")
-            || name.starts_with("rdm-update-") && (name.ends_with(".msi") || name.ends_with(".tmp"))
-            || name.starts_with("rdm-update-") && name.ends_with(".log") && old();
+            || update && [".msi", ".tmp", ".tar.gz", ".deb", ".rpm"].iter().any(|e| name.ends_with(e))
+            || update && name.ends_with(".log") && old();
         if leftover {
             let _ = std::fs::remove_file(entry.path());
+        } else if update && entry.file_type().is_ok_and(|t| t.is_dir()) {
+            let _ = std::fs::remove_dir_all(entry.path()); // an unpacked tarball (Linux)
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::{os::unix::fs::PermissionsExt, path::Path, process::Command};
+
+    use super::{Method, startup_exe, which};
+    use crate::{tr, trf};
+
+    pub fn install(method: Method, package: &Path) -> Result<(), String> {
+        match method {
+            Method::Binary => replace_binary(package),
+            Method::Deb => {
+                let tool = if which("apt-get").is_some() { vec!["apt-get", "install", "-y", "--allow-downgrades"] } else { vec!["dpkg", "-i"] };
+                elevated(&tool, package)
+            }
+            Method::Rpm => {
+                let tool = if which("dnf").is_some() {
+                    vec!["dnf", "install", "-y"]
+                } else if which("zypper").is_some() {
+                    vec!["zypper", "--non-interactive", "install", "--allow-unsigned-rpm"]
+                } else {
+                    vec!["rpm", "-U", "--replacepkgs"]
+                };
+                elevated(&tool, package)
+            }
+            Method::Msi | Method::Manual => Err(tr!("mise à jour impossible ici", "cannot update this copy").into()),
+        }
+    }
+
+    /// The package manager, as root after the system's password prompt (polkit).
+    fn elevated(tool: &[&str], package: &Path) -> Result<(), String> {
+        let status = Command::new("pkexec").args(tool).arg(package).status().map_err(|e| e.to_string())?;
+        match status.code() {
+            Some(0) => Ok(()),
+            Some(126 | 127) => Err(tr!("mot de passe refusé ou demande fermée", "password refused or prompt closed").into()),
+            Some(c) => Err(trf!("le gestionnaire de paquets a échoué (code {c})", "the package manager failed (code {c})")),
+            None => Err(tr!("installation interrompue", "installation interrupted").into()),
+        }
+    }
+
+    /// Unpacks the tarball and swaps the binary in place (a rename: the running process keeps its
+    /// file until it exits, and a crash half-way leaves the old binary intact).
+    fn replace_binary(archive: &Path) -> Result<(), String> {
+        let exe = startup_exe().ok_or_else(|| tr!("emplacement de RDM inconnu", "RDM's location is unknown").to_owned())?;
+        let work = super::work_dir().map_err(|e| e.to_string())?.join(format!("rdm-update-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+        let result = (|| {
+            let ok = Command::new("tar").arg("-xzf").arg(archive).arg("-C").arg(&work).status().is_ok_and(|s| s.success());
+            let new = work.join("rdm-linux-x64").join("rdm");
+            let elf = std::fs::read(&new).is_ok_and(|b| b.starts_with(b"\x7fELF"));
+            if !ok || !elf {
+                return Err(tr!("archive de mise à jour illisible", "unreadable update archive").to_owned());
+            }
+            let staged = exe.with_file_name(".rdm-update");
+            std::fs::copy(&new, &staged).map_err(|e| e.to_string())?;
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+            std::fs::rename(&staged, exe).map_err(|e| e.to_string())
+        })();
+        let _ = std::fs::remove_dir_all(&work);
+        result
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+mod linux {
+    use std::path::Path;
+
+    use super::Method;
+
+    pub fn install(_: Method, _: &Path) -> Result<(), String> {
+        Err(crate::tr!("mise à jour impossible ici", "cannot update this copy").into())
     }
 }
 
@@ -375,7 +690,7 @@ mod imp {
         UI::WindowsAndMessaging::{IDYES, MB_ICONWARNING, MB_SETFOREGROUND, MB_YESNO, MessageBoxW},
     };
 
-    use crate::settings::BRIDGE_PORT;
+    use crate::{settings::BRIDGE_PORT, tr, trf};
 
     /// Outside a job that would end it together with RDM (when the job allows it).
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
@@ -397,20 +712,21 @@ mod imp {
         wait_until(Duration::from_secs(15), || TcpListener::bind((Ipv4Addr::LOCALHOST, BRIDGE_PORT)).is_ok());
 
         let log = msi.with_extension("log");
-        let code = msiexec(&["/i".as_ref(), msi.as_os_str(), "/passive".as_ref(), "/norestart".as_ref(), "/l*v".as_ref(), log.as_os_str()]);
+        // Silent: no window at all; RDM's own card said "installing", and RDM comes back.
+        let code = msiexec(&["/i".as_ref(), msi.as_os_str(), "/qn".as_ref(), "/norestart".as_ref(), "/l*v".as_ref(), log.as_os_str()]);
         // 3010 / 1641: installed, a restart completes it.
         if !matches!(code, Some(0 | 3010 | 1641)) {
             let reason = match code {
-                Some(1602) => "installation annulée".to_owned(),
-                Some(1603) => "erreur de Windows Installer (1603)".to_owned(),
-                Some(1618) => "une autre installation est en cours (1618)".to_owned(),
-                Some(c) => format!("code {c}"),
-                None => "Windows Installer n'a pas pu être lancé".to_owned(),
+                Some(1602) => tr!("installation annulée", "installation cancelled").to_owned(),
+                Some(1603) => tr!("erreur de Windows Installer (1603)", "Windows Installer error (1603)").to_owned(),
+                Some(1618) => tr!("une autre installation est en cours (1618)", "another installation is in progress (1618)").to_owned(),
+                Some(c) => trf!("code {c}", "code {c}"),
+                None => tr!("Windows Installer n'a pas pu être lancé", "Windows Installer could not be started").to_owned(),
             };
-            let text = format!(
-                "La mise à jour de RDM n'a pas pu s'installer : {reason}.\n\nOuvrir l'installateur pour réessayer ? \
-                 (Sinon, RDM redémarre dans sa version actuelle.)\n\nJournal : {}",
-                log.display()
+            let log = log.display();
+            let text = trf!(
+                "La mise à jour de RDM n'a pas pu s'installer : {reason}.\n\nOuvrir l'installateur pour réessayer ? (Sinon, RDM redémarre dans sa version actuelle.)\n\nJournal : {log}",
+                "RDM's update could not be installed: {reason}.\n\nOpen the installer to try again? (Otherwise RDM restarts in its current version.)\n\nLog: {log}"
             );
             if ask(&text) {
                 msiexec(&["/i".as_ref(), msi.as_os_str()]);
@@ -471,7 +787,7 @@ mod imp {
 
     fn ask(text: &str) -> bool {
         let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
-        let (text, title) = (wide(text), wide("RDM — mise à jour"));
+        let (text, title) = (wide(text), wide(tr!("RDM — mise à jour", "RDM — update")));
         // SAFETY: NUL-terminated UTF-16 strings that outlive the call; no owner window.
         unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND) == IDYES }
     }
@@ -503,41 +819,73 @@ mod tests {
         assert!(is_newer("v0.2.0-beta", "0.1.0"));
     }
 
-    #[test]
-    fn finds_the_installer_with_its_checksum() {
-        let asset = |name: &str| Asset {
+    fn asset(name: &str) -> Asset {
+        Asset {
             name: name.into(),
             browser_download_url: format!("https://github.com/o/r/releases/download/v1/{name}"),
             size: 42,
             digest: Some("sha256:ABCDEF".into()),
-        };
-        let found = installer(&[asset("rdm-linux-x64.tar.gz"), asset("RDM-1.0.0-x64-setup.msi")]).unwrap();
-        assert!(found.url.ends_with("RDM-1.0.0-x64-setup.msi"));
-        assert_eq!((found.size, found.sha256.as_deref()), (42, Some("abcdef")));
-        assert!(installer(&[asset("rdm_1.0.0-1_amd64.deb")]).is_none());
+        }
+    }
+
+    #[test]
+    fn picks_the_package_of_each_installation_method() {
+        let mut assets = vec![
+            asset("RDM-1.0.0-x64-setup.msi"),
+            asset("RDM-1.0.0-x64-setup.msi.sig"),
+            asset("rdm-linux-x64.tar.gz"),
+            asset("rdm_1.0.0-1_amd64.deb"),
+            asset("rdm_1.0.0-1_amd64.deb.sig"),
+            asset("rdm-1.0.0-1.x86_64.rpm"),
+            asset("rdm-1.0.0-1.x86_64.rpm.sig"),
+            asset("rdm-firefox.xpi"),
+        ];
+        let msi = package(&assets, Method::Msi).unwrap();
+        assert!(msi.url.ends_with("RDM-1.0.0-x64-setup.msi"));
+        assert_eq!((msi.size, msi.sha256.as_deref()), (42, Some("abcdef")));
+        assert!(msi.signature.unwrap().ends_with(".msi.sig"));
+        assert!(package(&assets, Method::Binary).is_none(), "its signature is not online yet");
+        assets.push(asset("rdm-linux-x64.tar.gz.sig"));
+        assert_eq!(package(&assets, Method::Binary).unwrap().name, "rdm-linux-x64.tar.gz");
+        assert_eq!(package(&assets, Method::Deb).unwrap().name, "rdm_1.0.0-1_amd64.deb");
+        assert_eq!(package(&assets, Method::Rpm).unwrap().name, "rdm-1.0.0-1.x86_64.rpm");
+        assert!(package(&assets, Method::Manual).is_none());
     }
 
     #[test]
     fn older_versions_do_not_recognise_the_new_installer_name() {
-        // RDM 0.1 / 0.2 look for a name ending with "x64.msi" and have a broken installation
+        // RDM 0.1 / 0.2.0 look for a name ending with "x64.msi" and have a broken installation
         // step: they must fall back to opening the release page.
         let name = format!("RDM-{}-x64-setup.msi", env!("CARGO_PKG_VERSION"));
         assert!(!name.to_ascii_lowercase().ends_with("x64.msi"));
     }
 
-    #[tokio::test]
-    #[ignore = "network: downloads the latest release's installer from GitHub"]
-    async fn downloads_and_checks_the_published_installer() {
-        let client = crate::virustotal::client().unwrap();
-        let release = latest(&client).await.unwrap().unwrap();
-        let found = installer(&release.assets).expect("the latest release has an installer");
-        let path = download(&client, "selftest", &found, |_| {}).await.unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), found.size);
-        let _ = std::fs::remove_file(path);
-        // A file that does not match GitHub's checksum is refused.
-        let tampered = Installer { sha256: Some("0".repeat(64)), ..found };
-        let refused = download(&client, "selftest-bad", &tampered, |_| {}).await.unwrap_err();
-        assert!(refused.contains("SHA-256"), "{refused}");
+    #[test]
+    fn signatures_are_checked_against_the_release_key() {
+        // Made with the release key exactly as the release workflow does (`openssl pkeyutl -sign
+        // -rawin` over the statement).
+        const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let hex = "58bc8644f48626024e184357d866862636c6c1e0a87bbfe45437383bae392645\
+                   a728ed1a840668d9e9147528bead52304664bd6fd2199b86f8acb05717d23c04";
+        let good: Vec<u8> = (0..64).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap()).collect();
+        let statement = |version: &str, name: &str, sha: &str| signed_statement(version, name, sha).into_bytes();
+        assert!(signature_valid(&statement("0.3.0", "RDM-0.3.0-x64-setup.msi", EMPTY), &good));
+        assert!(!signature_valid(&statement("9.9.9", "RDM-0.3.0-x64-setup.msi", EMPTY), &good), "an old package replayed as newer");
+        assert!(!signature_valid(&statement("0.3.0", "rdm_0.3.0-1_amd64.deb", EMPTY), &good), "another package");
+        assert!(!signature_valid(&statement("0.3.0", "RDM-0.3.0-x64-setup.msi", &EMPTY.replace('e', "f")), &good), "other content");
+        let mut forged = good.clone();
+        forged[10] ^= 1;
+        assert!(!signature_valid(&statement("0.3.0", "RDM-0.3.0-x64-setup.msi", EMPTY), &forged), "a forged signature");
+        assert!(!signature_valid(&statement("0.3.0", "RDM-0.3.0-x64-setup.msi", EMPTY), &good[..12]), "a malformed one");
+    }
+
+    #[test]
+    fn formats_are_recognised() {
+        assert!(format_matches("a.msi", &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0]));
+        assert!(format_matches("a.tar.gz", &[0x1F, 0x8B, 8]));
+        assert!(format_matches("a.deb", b"!<arch>\ndebian"));
+        assert!(!format_matches("a.msi", b"<html>"));
+        assert!(!format_matches("a.exe", b"MZ"));
     }
 
     #[test]

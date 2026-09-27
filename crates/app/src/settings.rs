@@ -9,6 +9,8 @@ use directories::{ProjectDirs, UserDirs};
 use domain::Category;
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::Language;
+
 pub const BRIDGE_PORT: u16 = 9614;
 const FILE: &str = "settings.json";
 
@@ -20,19 +22,76 @@ pub enum Theme {
     Light,
 }
 
+/// What to do with a link copied to the clipboard (one whose extension is in the capture list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ClipboardMode {
+    Off,
+    /// Offer it in the window (one click to download).
+    #[default]
+    Ask,
+    /// Download it right away.
+    Auto,
+}
+
+/// A file of the same name is already in the destination folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ExistingFile {
+    /// `name (1).ext`.
+    #[default]
+    Rename,
+    Overwrite,
+    /// Not downloaded again.
+    Skip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ProxyMode {
+    /// Direct connections, whatever the environment says.
+    Off,
+    /// The system's proxy (Windows settings, `*_PROXY` variables, GNOME settings).
+    #[default]
+    System,
+    /// Always the proxy below.
+    Manual,
+    /// Direct first; through the proxy below when a download is slow or cannot connect.
+    Auto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Proxy {
+    #[serde(deserialize_with = "lenient")]
+    pub mode: ProxyMode,
+    /// `http://host:port`, `socks5://…` (names resolved by the proxy: `socks5h://`), `socks4a://…`.
+    pub url: String,
+    /// Proxy login (its password lives in the secret store, see `secrets`).
+    pub user: String,
+}
+
+/// A named queue: downloads added to it start while fewer than `max_parallel` of its own run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Queue {
+    pub id: u32,
+    pub name: String,
+    pub max_parallel: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub download_dir: PathBuf,
-    /// Default sub-folder per category (`Téléchargements/Vidéos`…), like IDM.
+    /// Default sub-folder per category (`Downloads/Videos`…), like IDM.
     pub categorize: bool,
     /// User-chosen folder per category; wins over the default above.
     pub category_dirs: BTreeMap<Category, PathBuf>,
     /// Extensions the browser extension hands over to RDM (space-separated).
     pub captured: String,
     pub connections: u8,
-    /// Downloads running at once; the rest wait in the queue.
+    /// Downloads of the main queue running at once; the rest wait.
     pub max_parallel: u8,
+    /// More named queues (the main one, id 0, is implicit).
+    #[serde(deserialize_with = "lenient")]
+    pub queues: Vec<Queue>,
     /// Global cap in KiB/s, 0 = unlimited.
     pub speed_limit_kib: u32,
     pub autostart: bool,
@@ -40,6 +99,7 @@ pub struct Settings {
     pub close_to_tray: bool,
     /// Desktop notification when a download finishes.
     pub notify: bool,
+    #[serde(deserialize_with = "lenient")]
     pub theme: Theme,
     /// The user's own (free) VirusTotal API key; empty = not set up.
     pub virustotal_key: String,
@@ -47,6 +107,16 @@ pub struct Settings {
     pub check_updates: bool,
     /// The browser-extension window was offered once on its own (first launch).
     pub extension_offered: bool,
+    /// Install updates without asking, once no download is running.
+    pub auto_update: bool,
+    #[serde(deserialize_with = "lenient")]
+    pub language: Language,
+    #[serde(deserialize_with = "lenient")]
+    pub clipboard: ClipboardMode,
+    #[serde(deserialize_with = "lenient")]
+    pub existing: ExistingFile,
+    #[serde(deserialize_with = "lenient")]
+    pub proxy: Proxy,
 }
 
 impl Default for Settings {
@@ -61,6 +131,7 @@ impl Default for Settings {
             captured: domain::default_captured(),
             connections: domain::DEFAULT_CONNECTIONS,
             max_parallel: 3,
+            queues: Vec::new(),
             speed_limit_kib: 0,
             autostart: false,
             close_to_tray: true,
@@ -69,8 +140,28 @@ impl Default for Settings {
             virustotal_key: String::new(),
             check_updates: true,
             extension_offered: false,
+            auto_update: false,
+            language: Language::Auto,
+            clipboard: ClipboardMode::Ask,
+            existing: ExistingFile::Rename,
+            proxy: Proxy::default(),
         }
     }
+}
+
+/// Most downloads a queue may run at once.
+pub const MAX_PARALLEL: u8 = 16;
+
+/// A value this version does not understand (written by a newer RDM, or edited by hand) falls
+/// back to its default instead of making the whole file unreadable — which would reset every
+/// setting.
+fn lenient<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
 impl Settings {
@@ -79,13 +170,26 @@ impl Settings {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
-        s.connections = s.connections.clamp(1, domain::MAX_CONNECTIONS);
-        s.max_parallel = s.max_parallel.clamp(1, 16);
-        if s.captured.trim().is_empty() {
-            s.captured = domain::default_captured();
-        }
-        s.virustotal_key = s.virustotal_key.trim().to_owned();
+        s.sanitize();
         s
+    }
+
+    /// Values read from a file (or typed) brought back within their bounds.
+    pub fn sanitize(&mut self) {
+        self.connections = self.connections.clamp(1, domain::MAX_CONNECTIONS);
+        self.max_parallel = self.max_parallel.clamp(1, MAX_PARALLEL);
+        if self.captured.trim().is_empty() {
+            self.captured = domain::default_captured();
+        }
+        self.virustotal_key = self.virustotal_key.trim().to_owned();
+        self.proxy.url = self.proxy.url.trim().to_owned();
+        // Queue ids: unique, never 0 (the main queue); names trimmed.
+        let mut seen = std::collections::HashSet::new();
+        self.queues.retain(|q| q.id != 0 && seen.insert(q.id));
+        for q in &mut self.queues {
+            q.max_parallel = q.max_parallel.clamp(1, MAX_PARALLEL);
+            q.name = q.name.trim().chars().take(40).collect();
+        }
     }
 
     pub fn save(&self) {
@@ -96,7 +200,14 @@ impl Settings {
     pub fn category_dir(&self, category: Category) -> PathBuf {
         match self.category_dirs.get(&category) {
             Some(dir) => dir.clone(),
-            None if self.categorize => self.download_dir.join(category.label()),
+            None if self.categorize => {
+                // Folder names follow the interface language; one created under the other name
+                // (the language changed since) keeps being used.
+                let english = crate::i18n::english();
+                let (name, other) = (category.label(english), category.label(!english));
+                let (dir, previous) = (self.download_dir.join(name), self.download_dir.join(other));
+                if !dir.exists() && previous.is_dir() { previous } else { dir }
+            }
             None => self.download_dir.clone(),
         }
     }
@@ -150,6 +261,8 @@ mod tests {
     #[test]
     fn category_folders() {
         let mut s = Settings { download_dir: PathBuf::from("dl"), ..Settings::default() };
+        let _one_at_a_time = crate::i18n::TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        crate::i18n::set(crate::i18n::Language::French);
         assert_eq!(s.target_dir("a.mp4"), PathBuf::from("dl").join("Vidéos"));
         s.category_dirs.insert(Category::Video, PathBuf::from("films"));
         assert_eq!(s.target_dir("a.mp4"), PathBuf::from("films"));
@@ -162,5 +275,15 @@ mod tests {
     fn old_settings_files_still_load() {
         let old: Settings = serde_json::from_str(r#"{"download_dir":"x","connections":32}"#).unwrap();
         assert!(old.notify && old.close_to_tray && !old.captured.is_empty());
+    }
+
+    #[test]
+    fn unknown_values_fall_back_instead_of_resetting_everything() {
+        let newer = r#"{"download_dir":"x","connections":7,"theme":"Neon","language":"Klingon",
+            "proxy":{"mode":"Pac","url":"http://p:1"},"queues":[{"id":3}],"existing":42}"#;
+        let s: Settings = serde_json::from_str(newer).unwrap();
+        assert_eq!((s.connections, s.theme, s.language), (7, Theme::System, Language::Auto));
+        assert_eq!((s.proxy.mode, s.proxy.url.as_str()), (ProxyMode::System, "http://p:1"), "only the unknown mode falls back");
+        assert!(s.queues.is_empty() && s.existing == ExistingFile::Rename);
     }
 }

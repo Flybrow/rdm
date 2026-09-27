@@ -115,7 +115,7 @@
       }
       const status = r.playabilityStatus?.status;
       if (status !== "OK") {
-        result.errors.push(`${c.name}: ${r.playabilityStatus?.reason ?? status ?? "refusé"}`);
+        result.errors.push(`${c.name}: ${r.playabilityStatus?.reason ?? status ?? "refused"}`);
         continue;
       }
       result.title ||= r.videoDetails?.title ?? "";

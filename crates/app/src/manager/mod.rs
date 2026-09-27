@@ -1,9 +1,12 @@
-//! Application service: owns the queue, schedules downloads and orchestrates the engine.
+//! Application service: owns the queues, schedules downloads and orchestrates the engine.
+
+pub mod checksum;
+pub mod clipboard;
+mod routes;
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs,
-    io::Read,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, Once, OnceLock, PoisonError,
@@ -17,15 +20,15 @@ use engine::{
     CancellationToken, Client, HeaderMap, HeaderValue, Outcome, Progress, RateLimit, header::HeaderName,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::{runtime::Handle, sync::Semaphore};
 use url::Url;
 
 use crate::{
     extension::{self, Browser, Flavour},
     notify,
-    settings::{Settings, save_json, with_suffix},
-    update,
+    secrets::Secrets,
+    settings::{ExistingFile, Settings, save_json, with_suffix},
+    tr, trf, update,
     virustotal::{self, Report, Stage},
 };
 
@@ -34,6 +37,9 @@ const UPDATE_EVERY: Duration = Duration::from_secs(24 * 3600);
 const STORE: &str = "downloads.json";
 /// Speeds, idle recordings and the list on disk are refreshed at this pace.
 const TICK: Duration = Duration::from_millis(500);
+/// … and at this one once nothing has moved for `IDLE_AFTER` ticks.
+const IDLE_TICK: Duration = Duration::from_secs(2);
+const IDLE_AFTER: u32 = 4;
 /// While transfers run, the list (with progress) is written every this many ticks (10 s).
 const PROGRESS_SAVE_TICKS: u32 = 20;
 /// Samples of the total speed kept for the chart: one minute.
@@ -48,6 +54,12 @@ const DUPLICATE_WINDOW: Duration = Duration::from_secs(5);
 /// Transient failures (network down, server busy) are retried on their own this many times in a
 /// row without progress — about half an hour — before the download is reported as failed.
 const AUTO_RETRIES: u32 = 15;
+
+/// Automatic proxy mode: a download that runs below `SLOW_SPEED` (bytes/s) for `SLOW_FOR`, once
+/// past its first `SLOW_GRACE`, switches to the proxy.
+const SLOW_SPEED: f64 = 32.0 * 1024.0;
+const SLOW_FOR: Duration = Duration::from_secs(20);
+const SLOW_GRACE: Duration = Duration::from_secs(15);
 
 /// 5 s, 10 s, 20 s, 40 s, 80 s, then every 2 minutes.
 fn retry_delay(retries: u32) -> Duration {
@@ -97,6 +109,10 @@ pub struct Entry {
     pub resolving: bool,
     /// Waiting to retry after a transient failure, and why it failed.
     pub retry: Option<Retry>,
+    /// Checksum verification of the finished file (see `checksum`).
+    pub verify: Verify,
+    /// Automatic proxy mode: this download goes through the proxy (slow or unreachable directly).
+    pub via_proxy: bool,
     headers: Vec<(String, String)>,
     cancel: Option<CancellationToken>,
     last: u64,
@@ -104,6 +120,25 @@ pub struct Entry {
     retries: u32,
     /// When it was added in this session (`None`: loaded from disk).
     added: Option<Instant>,
+    /// Its own speed limiter, shared with its running job: a change applies at once.
+    own_limit: Arc<RateLimit>,
+    /// When it last started, and since when it has been too slow (automatic proxy).
+    started: Option<Instant>,
+    slow_since: Option<Instant>,
+    /// Stopped to start again right away (new route, new link, certificate choice).
+    restart: bool,
+}
+
+/// Checking a finished file against the checksum the user gave.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Verify {
+    #[default]
+    None,
+    Running,
+    Ok,
+    /// The file's actual checksum.
+    Mismatch(String),
+    Failed(String),
 }
 
 /// A download back in the queue after a transient failure (network down, busy server).
@@ -131,13 +166,23 @@ pub enum ScanRefused {
     NotEligible,
 }
 
-type Launch = (DownloadId, engine::Job, Arc<Progress>, CancellationToken);
+/// A download about to start: its job, and how to reach its server.
+struct Launch {
+    id: DownloadId,
+    job: engine::Job,
+    progress: Arc<Progress>,
+    cancel: CancellationToken,
+    via_proxy: bool,
+    insecure: bool,
+}
 
 impl Entry {
     fn new(download: Download, headers: Vec<(String, String)>, downloaded: u64, total: u64) -> Self {
         let progress = Arc::new(Progress::default());
         progress.downloaded.store(downloaded, Relaxed);
         progress.total.store(total, Relaxed);
+        let own_limit = Arc::new(RateLimit::default());
+        own_limit.set(u64::from(download.speed_limit_kib) * 1024);
         let mut entry = Self {
             search_key: String::new(),
             name: String::new(),
@@ -149,14 +194,28 @@ impl Entry {
             scan: Scan::None,
             resolving: false,
             retry: None,
+            verify: Verify::None,
+            via_proxy: false,
             headers,
             cancel: None,
             last: downloaded,
             retries: 0,
             added: None,
+            own_limit,
+            started: None,
+            slow_since: None,
+            restart: false,
         };
         entry.named();
         entry
+    }
+
+    /// Stops a running transfer to start it again at once (it keeps its progress).
+    fn restart(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            self.restart = true;
+            cancel.cancel();
+        }
     }
 
     /// Derives what the list shows from the target (after creation, or a rename before start).
@@ -211,6 +270,9 @@ impl Entry {
     fn start(&mut self, limit: &Arc<RateLimit>) -> Option<Launch> {
         self.download.start().ok()?;
         self.retry = None;
+        self.restart = false;
+        self.started = Some(Instant::now());
+        self.slow_since = None;
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
         let job = engine::Job {
@@ -220,8 +282,16 @@ impl Entry {
             headers: to_header_map(&self.headers),
             audio: self.download.audio.clone(),
             limit: limit.clone(),
+            own_limit: self.own_limit.clone(),
         };
-        Some((self.download.id, job, self.progress.clone(), cancel))
+        Some(Launch {
+            id: self.download.id,
+            job,
+            progress: self.progress.clone(),
+            cancel,
+            via_proxy: self.via_proxy,
+            insecure: self.download.insecure,
+        })
     }
 
     /// What goes to disk: never the session secrets.
@@ -301,7 +371,20 @@ type Callback = Box<dyn Fn() + Send + Sync>;
 
 pub struct Manager {
     rt: Handle,
-    client: Client,
+    /// Used only if no configured client can be built.
+    fallback: Client,
+    /// One client per route (proxy or not, certificate exemption), built on first use.
+    clients: Mutex<HashMap<engine::ClientOptions, Client>>,
+    /// Site logins and the proxy password (see `secrets`).
+    secrets: Mutex<Secrets>,
+    /// Links found in the clipboard, waiting for a click.
+    offer: Mutex<Option<clipboard::Offer>>,
+    /// Text RDM copied itself (not offered back).
+    own_copy: Mutex<Option<String>>,
+    /// Short messages for the window (results of background actions).
+    notices: Mutex<Vec<Notice>>,
+    /// Quit to start the new version (Linux self-update): `main` launches it once all is saved.
+    restart_after_exit: AtomicBool,
     settings: Mutex<Settings>,
     entries: Mutex<Vec<Entry>>,
     /// Downloads whose engine task is still alive (even if already paused): never start a second
@@ -327,7 +410,8 @@ pub struct Manager {
     closed: Once,
     /// Total speed over the last minute, one sample per `TICK` (the UI's chart).
     history: Mutex<VecDeque<f32>>,
-    virustotal: OnceLock<reqwest::Client>,
+    /// Client for VirusTotal and GitHub, and the route it was built for.
+    web: Mutex<Option<(engine::Route, reqwest::Client)>>,
     /// One VirusTotal analysis at a time: the free API allows 4 requests per minute.
     scan_gate: Arc<Semaphore>,
     update: Mutex<update::State>,
@@ -338,6 +422,15 @@ pub struct Manager {
 }
 
 const BROWSERS_FILE: &str = "browsers.json";
+/// Messages kept for the window while it is closed.
+const MAX_NOTICES: usize = 20;
+
+/// A message for the window (a toast): the outcome of something done in the background.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    pub warning: bool,
+    pub text: String,
+}
 
 /// Installing the extension into one browser, as the extension window shows it.
 #[derive(Debug, Clone)]
@@ -360,10 +453,12 @@ pub struct Installed {
 }
 
 /// Firefox gives each install of an extension a random origin (`moz-extension://<uuid>`), which
-/// cannot be pinned like Chrome's: the user approves it once in the RDM window.
+/// cannot be pinned like Chrome's: the native connector pairs it (the browser vouches for the
+/// extension), or, without the connector, the user approves it once in the RDM window.
 #[derive(Default)]
 struct FirefoxPairing {
-    paired: Option<String>,
+    /// Firefox, Waterfox, LibreWolf… each profile has its own origin; the latest few are kept.
+    paired: VecDeque<String>,
     pending: Option<String>,
     /// Refused this session: never asked again until RDM restarts.
     refused: HashSet<String>,
@@ -375,6 +470,32 @@ struct FirefoxPairing {
 const FIREFOX_SNOOZE: Duration = Duration::from_secs(30 * 60);
 
 const FIREFOX_FILE: &str = "firefox.json";
+const MAX_PAIRED: usize = 8;
+
+impl FirefoxPairing {
+    /// `firefox.json`: a list of origins (RDM 0.2 wrote a single one).
+    fn load() -> VecDeque<String> {
+        let bytes = std::fs::read(crate::settings::config_file(FIREFOX_FILE)).unwrap_or_default();
+        let origins = serde_json::from_slice::<VecDeque<String>>(&bytes)
+            .or_else(|_| serde_json::from_slice::<String>(&bytes).map(|o| VecDeque::from([o])))
+            .unwrap_or_default();
+        origins.into_iter().filter(|o| is_firefox_origin(o)).take(MAX_PAIRED).collect()
+    }
+
+    fn pair(&mut self, origin: String) {
+        self.refused.remove(&origin);
+        if self.pending.as_ref() == Some(&origin) {
+            self.pending = None;
+        }
+        if !self.paired.contains(&origin) {
+            self.paired.push_back(origin);
+            while self.paired.len() > MAX_PAIRED {
+                self.paired.pop_front();
+            }
+            save_json(FIREFOX_FILE, &self.paired);
+        }
+    }
+}
 
 fn is_firefox_origin(origin: &str) -> bool {
     origin.strip_prefix("moz-extension://").is_some_and(|id| {
@@ -383,13 +504,20 @@ fn is_firefox_origin(origin: &str) -> bool {
 }
 
 impl Manager {
-    pub fn new(rt: Handle, client: Client) -> Arc<Self> {
+    pub fn new(rt: Handle, fallback: Client) -> Arc<Self> {
         let settings = Settings::load();
+        crate::i18n::set(settings.language);
         let limit = Arc::new(RateLimit::default());
         limit.set(u64::from(settings.speed_limit_kib) * 1024);
         let this = Arc::new(Self {
             rt,
-            client,
+            fallback,
+            clients: Mutex::default(),
+            secrets: Mutex::new(Secrets::load()),
+            offer: Mutex::default(),
+            own_copy: Mutex::default(),
+            notices: Mutex::default(),
+            restart_after_exit: AtomicBool::new(false),
             settings: Mutex::new(settings),
             entries: Mutex::new(load_entries()),
             busy: Mutex::default(),
@@ -399,13 +527,7 @@ impl Manager {
             repaint: OnceLock::new(),
             show: OnceLock::new(),
             quit: OnceLock::new(),
-            firefox: Mutex::new(FirefoxPairing {
-                paired: std::fs::read(crate::settings::config_file(FIREFOX_FILE))
-                    .ok()
-                    .and_then(|b| serde_json::from_slice::<String>(&b).ok())
-                    .filter(|o| is_firefox_origin(o)),
-                ..FirefoxPairing::default()
-            }),
+            firefox: Mutex::new(FirefoxPairing { paired: FirefoxPairing::load(), ..FirefoxPairing::default() }),
             dirty: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             saved_generation: Mutex::new(0),
@@ -413,7 +535,7 @@ impl Manager {
             closing: AtomicBool::new(false),
             closed: Once::new(),
             history: Mutex::new(std::iter::repeat_n(0.0, HISTORY).collect()),
-            virustotal: OnceLock::new(),
+            web: Mutex::default(),
             scan_gate: Arc::new(Semaphore::new(1)),
             update: Mutex::default(),
             browsers: Mutex::new(
@@ -426,12 +548,49 @@ impl Manager {
         });
         this.spawn_ticker();
         this.spawn_update_checks();
+        this.spawn_clipboard_watch();
         this.schedule();
         this
     }
 
-    pub fn client(&self) -> &Client {
-        &self.client
+    /// A message for the window's next frame (kept, a few, while it is closed).
+    pub(crate) fn notice(&self, warning: bool, text: &str) {
+        let mut notices = lock(&self.notices);
+        if notices.len() >= MAX_NOTICES {
+            notices.remove(0);
+        }
+        notices.push(Notice { warning, text: text.to_owned() });
+        drop(notices);
+        self.repaint();
+    }
+
+    /// The messages not shown yet.
+    pub fn take_notices(&self) -> Vec<Notice> {
+        std::mem::take(&mut *lock(&self.notices))
+    }
+
+    /// The saved passwords (site logins, proxy), for the settings.
+    pub fn secrets(&self) -> Secrets {
+        lock(&self.secrets).clone()
+    }
+
+    /// Replaces the saved passwords; downloads started from now on use them.
+    pub fn set_secrets(&self, secrets: Secrets) {
+        let changed = {
+            let mut current = lock(&self.secrets);
+            let changed = *current != secrets;
+            *current = secrets;
+            changed
+        };
+        if changed {
+            lock(&self.secrets).save();
+            self.forget_clients(); // the proxy password may have changed
+        }
+    }
+
+    /// Quit to let the new version start (see `restart_after_exit`).
+    pub fn restart_requested(&self) -> bool {
+        self.restart_after_exit.load(Acquire)
     }
 
     pub fn on_change(&self, f: impl Fn() + Send + Sync + 'static) {
@@ -467,7 +626,7 @@ impl Manager {
             return false;
         }
         let mut ff = lock(&self.firefox);
-        if ff.paired.as_deref() == Some(origin) {
+        if ff.paired.iter().any(|o| o == origin) {
             return true;
         }
         let snoozed = ff.snoozed_until.is_some_and(|t| Instant::now() < t);
@@ -495,15 +654,23 @@ impl Manager {
         let mut ff = lock(&self.firefox);
         let Some(origin) = ff.pending.take() else { return };
         match allow {
-            Some(true) => {
-                save_json(FIREFOX_FILE, &origin);
-                ff.paired = Some(origin);
-            }
+            Some(true) => ff.pair(origin),
             Some(false) => {
                 ff.refused.insert(origin);
             }
             None => ff.snoozed_until = Some(Instant::now() + FIREFOX_SNOOZE),
         }
+    }
+
+    /// The native connector vouches for this Firefox extension origin (the browser started the
+    /// connector for the RDM extension only): paired without asking.
+    pub fn pair_firefox(&self, origin: &str) -> bool {
+        if !is_firefox_origin(origin) {
+            return false;
+        }
+        lock(&self.firefox).pair(origin.to_owned());
+        self.repaint();
+        true
     }
 
     /// The extension reported which browser it runs in (`x-rdm-browser`).
@@ -551,10 +718,12 @@ impl Manager {
         let flavour = browser.flavour();
         let blocking = |e: tokio::task::JoinError| e.to_string();
         let exe = tokio::task::spawn_blocking(move || browser.find()).await.map_err(blocking)?;
+        // The connector too (a browser installed since RDM started has not got it yet).
+        let _ = tokio::task::spawn_blocking(crate::native::register).await;
         let folder = tokio::task::spawn_blocking(move || extension::write(flavour))
             .await
             .map_err(blocking)?
-            .map_err(|e| format!("impossible d'écrire l'extension : {e}"))?;
+            .map_err(|e| trf!("impossible d'écrire l'extension : {e}", "cannot write the extension: {e}"))?;
         let mut done = Installed { folder, launched: false, signed: false, xpi: None };
         let open = |target: &str| exe.as_deref().is_some_and(|exe| extension::launch(exe, target).is_ok());
         if flavour == Flavour::Firefox {
@@ -593,9 +762,31 @@ impl Manager {
     }
 
     /// Takes effect immediately; `save_settings` persists (the UI debounces it, shutdown flushes it).
-    pub fn apply_settings(self: &Arc<Self>, new: Settings) {
+    pub fn apply_settings(self: &Arc<Self>, mut new: Settings) {
+        new.sanitize();
         self.limit.set(u64::from(new.speed_limit_kib) * 1024);
-        *lock(&self.settings) = new;
+        crate::i18n::set(new.language);
+        let (proxy_changed, queues) = {
+            let mut current = lock(&self.settings);
+            let proxy_changed = current.proxy != new.proxy;
+            let queues: HashSet<u32> = new.queues.iter().map(|q| q.id).collect();
+            *current = new;
+            (proxy_changed, queues)
+        };
+        if proxy_changed {
+            self.forget_clients();
+        }
+        // Downloads of a deleted queue go back to the main one.
+        let mut moved = false;
+        for e in lock(&self.entries).iter_mut() {
+            if e.download.queue != 0 && !queues.contains(&e.download.queue) {
+                e.download.queue = 0;
+                moved = true;
+            }
+        }
+        if moved {
+            self.changed();
+        }
         self.settings_dirty.store(true, Release);
         self.schedule();
     }
@@ -647,17 +838,23 @@ impl Manager {
 
     /// Name from the server; HLS gets the extension of what will actually be written.
     async fn suggest_name(&self, url: &Url, headers: &HeaderMap) -> Option<String> {
-        let probe = engine::probe_once(&self.client, url, headers).await.ok()?;
+        let client = self.client();
+        // The site's saved login too: without it a protected server only answers 401.
+        let mut headers = headers.clone();
+        self.add_login(url, &mut headers);
+        let headers = &headers;
+        let probe = engine::probe_once(&client, url, headers).await.ok()?;
         if !probe.hls {
             return Some(probe.file_name);
         }
-        let fmp4 = engine::hls_info(&self.client, url, headers).await.is_ok_and(|i| i.fmp4);
+        let fmp4 = engine::hls_info(&client, url, headers).await.is_ok_and(|i| i.fmp4);
         let stem = probe.file_name.rsplit_once('.').map_or(probe.file_name.as_str(), |(s, _)| s);
         Some(format!("{stem}.{}", if fmp4 { "mp4" } else { "ts" }))
     }
 
     /// The server's name for a new download (if it gave one): its target follows, unless it
-    /// already started meanwhile. Either way it may start now.
+    /// already started meanwhile. Either way it may start now — or, when a file of that name
+    /// exists and the settings say to skip it, it goes away.
     fn resolved(&self, id: DownloadId, name: Option<String>) {
         let settings = self.settings();
         let mut entries = lock(&self.entries);
@@ -665,9 +862,19 @@ impl Manager {
         if let Some(name) = name.filter(|n| *n != entries[i].name)
             && matches!(entries[i].download.status(), Status::Queued | Status::Paused)
         {
-            let target = unique_path(&settings.target_dir(&name), &name, &entries, Some(id));
-            entries[i].download.target = target;
-            entries[i].named();
+            match target_for(&settings, &name, &entries, Some(id)) {
+                Some(target) => {
+                    entries[i].download.target = target;
+                    entries[i].named();
+                }
+                None => {
+                    entries.remove(i);
+                    drop(entries);
+                    self.notice(false, &trf!("Déjà téléchargé, ignoré : {name}", "Already downloaded, skipped: {name}"));
+                    self.changed();
+                    return;
+                }
+            }
         }
         entries[i].resolving = false;
         drop(entries);
@@ -701,7 +908,7 @@ impl Manager {
     /// Removes from the list; `delete_file` also erases the file (always for unfinished parts).
     pub fn remove(self: &Arc<Self>, id: DownloadId, delete_file: bool) {
         if let Some(token) = self.token_of(id) {
-            self.cancel_recording(&token, "annulé");
+            self.cancel_recording(&token, tr!("annulé", "cancelled"));
         }
         let removed = {
             let mut entries = lock(&self.entries);
@@ -745,19 +952,25 @@ impl Manager {
         };
         let this = self.clone();
         self.rt.spawn_blocking(move || {
-            if let Ok(hash) = sha256_file(&path) {
+            if let Ok(hash) = checksum::digest(&path, checksum::Algo::Sha256) {
                 this.update(id, |e| e.sha256 = Some(hash));
             }
         });
     }
 
-    /// Client for VirusTotal and GitHub (not the download engine's: see `virustotal::client`).
+    /// Client for VirusTotal and GitHub (not the download engine's: see `virustotal::client`),
+    /// through the proxy of the settings like downloads; rebuilt when that changes.
     fn web(&self) -> Option<reqwest::Client> {
-        if let Some(c) = self.virustotal.get() {
-            return Some(c.clone());
+        let route = self.route(false);
+        let mut web = lock(&self.web);
+        if let Some((built_for, client)) = web.as_ref()
+            && *built_for == route
+        {
+            return Some(client.clone());
         }
-        let client = virustotal::client().ok()?;
-        Some(self.virustotal.get_or_init(|| client).clone())
+        let client = virustotal::client(&route).or_else(|_| virustotal::client(&engine::Route::System)).ok()?;
+        *web = Some((route, client.clone()));
+        Some(client)
     }
 
     pub fn update_state(&self) -> update::State {
@@ -770,7 +983,8 @@ impl Manager {
     }
 
     /// At start (after a few seconds) and once a day, if enabled in the settings; sooner when the
-    /// release was seen before its installer was attached.
+    /// release was seen before its package was attached. With automatic updates on, a release RDM
+    /// installs without asking anything is installed as soon as nothing is downloading.
     fn spawn_update_checks(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
         self.rt.spawn(async move {
@@ -784,19 +998,41 @@ impl Manager {
                 // The check runs in the background: give it time to land before looking at it.
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 let incomplete = weak.upgrade().is_some_and(|this| {
-                    cfg!(windows) && this.update_state().release().is_some_and(|r| r.msi.is_none())
+                    update::method() != update::Method::Manual && this.update_state().release().is_some_and(|r| r.package.is_none())
                 });
-                tokio::time::sleep(if incomplete { Duration::from_secs(15 * 60) } else { UPDATE_EVERY }).await;
+                let next = tokio::time::Instant::now() + if incomplete { Duration::from_secs(15 * 60) } else { UPDATE_EVERY };
+                // Meanwhile, once a minute: install when idle, if allowed.
+                while tokio::time::Instant::now() < next {
+                    let Some(this) = weak.upgrade() else { return };
+                    this.auto_install();
+                    drop(this);
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
             }
         });
+    }
+
+    /// Automatic updates: installs the release on offer when RDM can do it without any prompt
+    /// (Windows installer, Linux binary in the user's folders) and nothing is downloading.
+    fn auto_install(self: &Arc<Self>) {
+        let silent = matches!(update::method(), update::Method::Msi | update::Method::Binary);
+        let ready = matches!(self.update_state(), update::State::Available(ref r) if update::installs_itself(r));
+        if !silent || !ready || !self.with_settings(|s| s.auto_update) || self.is_closing() {
+            return;
+        }
+        let stats = self.stats();
+        let recording = lock(&self.entries).iter().any(|e| e.download.is_recording() && *e.download.status() == Status::Running);
+        if stats.running == 0 && stats.queued == 0 && !recording {
+            self.install_update();
+        }
     }
 
     /// Asks GitHub for a newer release. `manual`: the user clicked, so "up to date" and errors show.
     pub fn check_updates(self: &Arc<Self>, manual: bool) {
         let current = self.update_state();
-        // A release first seen without its installer (published a minute before the Windows build
-        // finished uploading it) is looked at again.
-        if current.busy() || (!manual && current.release().is_some_and(|r| r.msi.is_some())) {
+        // A release first seen without its package (published a minute before the build finished
+        // uploading it) is looked at again.
+        if current.busy() || (!manual && current.release().is_some_and(|r| r.package.is_some())) {
             return;
         }
         if manual {
@@ -815,37 +1051,54 @@ impl Manager {
         });
     }
 
-    /// Windows: downloads and checks the new `.msi`, hands it to the installation assistant, then
-    /// quits (the assistant installs it and starts RDM again, see `update`). `false` when RDM
-    /// cannot install it itself (the UI then opens the release page).
+    /// Downloads and checks the package (signature included), then installs it without any window:
+    /// on Windows the installation assistant takes over once RDM has quit; on Linux the package is
+    /// installed first, then RDM quits and starts again. `false` when RDM cannot install this
+    /// release itself (the UI then opens the release page).
     pub fn install_update(self: &Arc<Self>) -> bool {
         let Some(release) = self.update_state().release().cloned() else { return false };
-        let Some(installer) = release.msi.clone().filter(|_| update::can_self_install()) else { return false };
+        let Some(package) = release.package.clone().filter(|_| update::installs_itself(&release)) else { return false };
         self.set_update(update::State::Downloading(0.0));
         let this = self.clone();
         self.rt.spawn(async move {
             // The update stays on offer: the card lets the user try again.
             let fail = |reason: String| this.set_update(update::State::InstallFailed(release.clone(), reason));
             let Some(client) = this.web() else {
-                return fail("client HTTP indisponible".into());
+                return fail(tr!("client HTTP indisponible", "HTTP client unavailable").into());
             };
             let progress = {
                 let this = this.clone();
                 move |f: f32| {
-                    *lock(&this.update) = update::State::Downloading(f);
+                    let mut state = lock(&this.update);
+                    // One repaint per percent is plenty.
+                    if matches!(*state, update::State::Downloading(old) if (f - old).abs() < 0.01 && f < 1.0) {
+                        return;
+                    }
+                    *state = update::State::Downloading(f);
+                    drop(state);
                     this.repaint();
                 }
             };
-            let msi = match update::download(&client, &release.version, &installer, progress).await {
-                Ok(msi) => msi,
+            let file = match update::download(&client, &release.version, &package, progress).await {
+                Ok(file) => file,
                 Err(reason) => return fail(reason),
             };
-            match update::start_installation(&msi) {
+            this.set_update(update::State::Installing);
+            if update::method() == update::Method::Msi {
+                match update::start_installation(&file) {
+                    Ok(()) => this.request_quit(),
+                    Err(e) => fail(trf!("impossible de lancer l'installation : {e}", "cannot start the installation: {e}")),
+                }
+                return;
+            }
+            let result = update::install_linux(file.clone()).await;
+            let _ = tokio::fs::remove_file(&file).await;
+            match result {
                 Ok(()) => {
-                    this.set_update(update::State::Installing);
+                    this.restart_after_exit.store(true, Release);
                     this.request_quit();
                 }
-                Err(e) => fail(format!("impossible de lancer l'installation : {e}")),
+                Err(reason) => fail(reason),
             }
         });
         true
@@ -883,7 +1136,7 @@ impl Manager {
                     None => {
                         stage(Stage::Hashing);
                         let file = path.clone();
-                        let hash = tokio::task::spawn_blocking(move || sha256_file(&file))
+                        let hash = tokio::task::spawn_blocking(move || checksum::digest(&file, checksum::Algo::Sha256))
                             .await
                             .map_err(|_| virustotal::Error::Io)?
                             .map_err(|_| virustotal::Error::Io)?;
@@ -891,13 +1144,7 @@ impl Manager {
                         hash
                     }
                 };
-                let client = match this.virustotal.get() {
-                    Some(client) => client.clone(),
-                    None => {
-                        let client = virustotal::client().map_err(|_| virustotal::Error::Network)?;
-                        this.virustotal.get_or_init(|| client).clone()
-                    }
-                };
+                let client = this.web().ok_or(virustotal::Error::Network)?;
                 virustotal::scan(&client, &key, &path, &sha256, stage).await
             }
             .await;
@@ -975,8 +1222,8 @@ impl Manager {
         self.rt.spawn_blocking(move || {
             let result = match r.best_source() {
                 Some(ms) => engine::mux::merge(&r.part(ms, Track::Video), &r.part(ms, Track::Audio), &r.target)
-                    .map_err(|e| format!("fusion audio/vidéo impossible : {e}")),
-                None => Err("aucune donnée vidéo et audio reçue".to_owned()),
+                    .map_err(|e| trf!("fusion audio/vidéo impossible : {e}", "cannot merge audio and video: {e}")),
+                None => Err(tr!("aucune donnée vidéo et audio reçue", "no video or audio data received").to_owned()),
             };
             for (ms, track) in r.parts.keys() {
                 let _ = fs::remove_file(r.part(*ms, *track));
@@ -1029,7 +1276,7 @@ impl Manager {
             .map(|(t, _)| t.clone())
             .collect();
         for token in idle {
-            self.cancel_recording(&token, "enregistrement interrompu (onglet fermé ou lecture arrêtée)");
+            self.cancel_recording(&token, tr!("enregistrement interrompu (onglet fermé ou lecture arrêtée)", "recording interrupted (tab closed or playback stopped)"));
         }
     }
 
@@ -1062,24 +1309,36 @@ impl Manager {
         if self.is_closing() {
             return;
         }
-        let max = usize::from(self.with_settings(|s| s.max_parallel));
+        // Each queue has its own number of places; a download of an unknown queue counts as the
+        // main queue's.
+        let (limits, main_limit) = self.with_settings(|s| {
+            let limits: HashMap<u32, usize> = s.queues.iter().map(|q| (q.id, usize::from(q.max_parallel))).collect();
+            (limits, usize::from(s.max_parallel))
+        });
+        let queue_of = |q: u32| if limits.contains_key(&q) { q } else { 0 };
+        let limit_of = |q: u32| limits.get(&q).copied().unwrap_or(main_limit);
         let now = Instant::now();
         let launches: Vec<Launch> = {
             let mut entries = lock(&self.entries);
             let mut busy = lock(&self.busy);
-            let mut free = max.saturating_sub(entries.iter().filter(|e| e.occupies_slot()).count());
+            let mut running: HashMap<u32, usize> = HashMap::new();
+            for e in entries.iter().filter(|e| e.occupies_slot()) {
+                *running.entry(queue_of(e.download.queue)).or_default() += 1;
+            }
             let mut launches = Vec::new();
             for e in entries.iter_mut() {
-                if free == 0 {
-                    break;
-                }
                 if !e.startable(now) || busy.contains(&e.download.id) {
                     continue;
                 }
+                let queue = queue_of(e.download.queue);
+                let taken = running.entry(queue).or_default();
+                if *taken >= limit_of(queue) {
+                    continue;
+                }
                 if let Some(launch) = e.start(&self.limit) {
-                    busy.insert(launch.0);
+                    busy.insert(launch.id);
                     launches.push(launch);
-                    free -= 1;
+                    *taken += 1;
                 }
             }
             launches
@@ -1091,39 +1350,62 @@ impl Manager {
         launches.into_iter().for_each(|launch| self.run(launch));
     }
 
-    fn run(self: &Arc<Self>, (id, job, progress, cancel): Launch) {
+    fn run(self: &Arc<Self>, launch: Launch) {
+        let Launch { id, mut job, progress, cancel, via_proxy, insecure } = launch;
         self.inflight.fetch_add(1, AcqRel);
         let this = self.clone();
         self.rt.spawn(async move {
+            this.add_login(&job.url, &mut job.headers);
             let before = progress.downloaded.load(Relaxed);
-            let result = engine::run(&this.client, &job, progress.clone(), cancel).await;
+            let result = match this.client_for(this.route(via_proxy), insecure) {
+                Ok(client) => Ok(engine::run(&client, &job, progress.clone(), cancel).await),
+                Err(reason) => Err(reason),
+            };
             let progressed = progress.downloaded.load(Relaxed) > before;
-            let mut finished = None;
+            let auto_proxy = this.auto_proxy();
+            let (mut finished, mut verify) = (None, false);
             this.update(id, |e| {
                 e.cancel = None;
+                let restart = std::mem::take(&mut e.restart);
                 if progressed {
                     e.retries = 0;
                 }
                 let _ = match &result {
-                    Ok(Outcome::Completed) => {
+                    Err(reason) => e.download.fail(reason.clone()),
+                    Ok(Ok(Outcome::Completed)) => {
                         mark_from_internet(&e.download.target);
                         let _ = e.download.start(); // a pause may have raced the last byte
                         finished = Some(e.name.clone());
+                        verify = e.download.checksum.is_some();
                         e.retries = 0;
                         e.download.complete()
                     }
-                    Ok(Outcome::Paused) => Ok(()),
+                    // Stopped to start again (new route, link, certificate choice): straight back.
+                    Ok(Ok(Outcome::Paused)) if restart => e.download.retry_later(),
+                    Ok(Ok(Outcome::Paused)) => Ok(()),
                     // Network down, server busy: back in the queue, retried later on its own.
-                    Err(err) if !err.is_permanent() && e.retries < AUTO_RETRIES && e.download.retry_later().is_ok() => {
-                        e.retry = Some(Retry { at: Instant::now() + retry_delay(e.retries), reason: describe(err) });
+                    Ok(Err(err)) if !err.is_permanent() && e.retries < AUTO_RETRIES && e.download.retry_later().is_ok() => {
+                        // Automatic proxy mode: a server the direct route cannot reach is tried
+                        // through the proxy, at once.
+                        let unreachable = matches!(err, engine::EngineError::Http(h) if h.is_connect() || h.is_timeout());
+                        let delay = if auto_proxy && !e.via_proxy && unreachable {
+                            e.via_proxy = true;
+                            Duration::ZERO
+                        } else {
+                            retry_delay(e.retries)
+                        };
+                        e.retry = Some(Retry { at: Instant::now() + delay, reason: describe(err) });
                         e.retries += 1;
                         Ok(())
                     }
-                    Err(err) => e.download.fail(describe(err)),
+                    Ok(Err(err)) => e.download.fail(describe(err)),
                 };
             });
             lock(&this.busy).remove(&id);
             this.inflight.fetch_sub(1, AcqRel);
+            if verify {
+                this.verify(id);
+            }
             if let Some(name) = finished
                 && this.with_settings(|s| s.notify)
             {
@@ -1131,6 +1413,80 @@ impl Manager {
             }
             this.schedule();
         });
+    }
+
+    /// Replaces the link of a download that stopped working (expired, moved) and resumes it where
+    /// it was. The new link must lead to the same file: when the server tells its size and it
+    /// differs, the change is refused (the parts already downloaded would not fit).
+    pub fn change_url(self: &Arc<Self>, id: DownloadId, url: Url) {
+        let Some((total, headers, via_proxy, insecure)) =
+            self.view(|es| es.iter().find(|e| e.download.id == id).map(|e| (e.progress.total.load(Relaxed), to_header_map(&e.headers), e.via_proxy, e.download.insecure)))
+        else {
+            return;
+        };
+        let this = self.clone();
+        self.rt.spawn(async move {
+            let size = match this.client_for(this.route(via_proxy), insecure) {
+                Ok(client) => engine::probe_once(&client, &url, &headers).await.ok().and_then(|p| p.size),
+                Err(_) => None,
+            };
+            if total > 0 && size.is_some_and(|s| s != total) {
+                let (have, got) = (crate::ui::size_text(total), crate::ui::size_text(size.unwrap_or(0)));
+                this.notice(true, &trf!(
+                    "Lien refusé : le fichier fait {got}, pas {have} (ce n'est pas le même)",
+                    "Link refused: the file is {got}, not {have} (not the same file)"
+                ));
+                return;
+            }
+            let changed = this.update(id, |e| {
+                if e.download.is_recording() || *e.download.status() == Status::Completed {
+                    return false;
+                }
+                e.download.url = url.clone();
+                e.retries = 0;
+                e.retry = None;
+                match e.download.status() {
+                    Status::Running => e.restart(),
+                    Status::Failed(_) => {
+                        let _ = e.download.enqueue();
+                    }
+                    _ => {}
+                }
+                true
+            });
+            if changed == Some(true) {
+                this.notice(false, tr!("Lien remplacé : le téléchargement reprend où il en était", "Link replaced: the download resumes where it was"));
+                this.schedule();
+            }
+        });
+    }
+
+    /// This download's own speed cap (KiB/s, 0 = none), applied at once if it runs.
+    pub fn set_speed_limit(&self, id: DownloadId, kib: u32) {
+        self.update(id, |e| {
+            e.download.speed_limit_kib = kib;
+            e.own_limit.set(u64::from(kib) * 1024);
+        });
+    }
+
+    pub fn move_to_queue(self: &Arc<Self>, id: DownloadId, queue: u32) {
+        self.update(id, |e| e.download.queue = queue);
+        self.schedule();
+    }
+
+    /// Accepts (or not) an invalid TLS certificate for this download only, and retries it.
+    pub fn set_insecure(self: &Arc<Self>, id: DownloadId, insecure: bool) {
+        self.update(id, |e| {
+            e.download.insecure = insecure;
+            match e.download.status() {
+                Status::Running => e.restart(),
+                Status::Failed(_) if insecure => {
+                    let _ = e.download.enqueue();
+                }
+                _ => {}
+            }
+        });
+        self.schedule();
     }
 
     /// `None` when the same link was added a moment ago (a double click, a page asking twice).
@@ -1143,7 +1499,17 @@ impl Manager {
         if twice {
             return None;
         }
-        let target = unique_path(&settings.target_dir(name), name, &entries, None);
+        // A name already known (the page gave it): an existing file may mean "skip".
+        let target = if resolving {
+            unique_path(&settings.target_dir(name), name, &entries, None)
+        } else {
+            let Some(target) = target_for(&settings, name, &entries, None) else {
+                drop(entries);
+                self.notice(false, &trf!("Déjà téléchargé, ignoré : {name}", "Already downloaded, skipped: {name}"));
+                return None;
+            };
+            target
+        };
         let mut download = Download::new(url, target, settings.connections);
         download.audio = audio;
         let id = download.id;
@@ -1207,14 +1573,17 @@ impl Manager {
     fn spawn_ticker(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
         self.rt.spawn(async move {
-            let mut tick = tokio::time::interval(TICK);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut ticks = 0u32;
+            let (mut ticks, mut idle, mut last) = (0u32, 0u32, Instant::now());
             loop {
-                tick.tick().await;
+                // Nothing moving for a while: fewer wake-ups (a new download is started by the
+                // scheduler itself, not by this tick).
+                tokio::time::sleep(if idle >= IDLE_AFTER { IDLE_TICK } else { TICK }).await;
                 let Some(this) = weak.upgrade() else { return };
                 this.reap_idle_recordings();
-                let (moving, retry_due) = this.tick();
+                let elapsed = std::mem::replace(&mut last, Instant::now()).elapsed();
+                let (moving, retry_due) = this.tick(elapsed);
+                let recording = !lock(&this.recordings).is_empty();
+                idle = if moving || retry_due || recording { 0 } else { idle.saturating_add(1) };
                 if moving {
                     this.repaint();
                 }
@@ -1237,19 +1606,36 @@ impl Manager {
     /// Updates speeds and the history. Returns whether the UI has something moving to show (a
     /// running download, a retry countdown, the chart still scrolling back to zero), and whether
     /// a download waiting to retry is due.
-    fn tick(&self) -> (bool, bool) {
+    fn tick(&self, elapsed: Duration) -> (bool, bool) {
         let (mut active, mut total, mut due) = (false, 0.0, false);
         let now = Instant::now();
+        let auto_proxy = self.auto_proxy();
         for e in lock(&self.entries).iter_mut() {
-            let (done, _, _) = e.progress.snapshot();
+            let (done, total_size, _) = e.progress.snapshot();
             let running = *e.download.status() == Status::Running;
-            let instant = done.saturating_sub(e.last) as f64 / TICK.as_secs_f64();
+            let instant = done.saturating_sub(e.last) as f64 / elapsed.as_secs_f64().max(0.05);
             e.speed = if running { e.speed * 0.6 + instant * 0.4 } else { 0.0 };
             e.last = done;
             let waiting = *e.download.status() == Status::Queued && e.retry.is_some();
             active |= running || waiting || e.resolving;
             due |= waiting && e.startable(now);
             total += e.speed;
+            // Automatic proxy mode: a download stuck slow on the direct route switches (it keeps
+            // its progress). Not near its end: a nearly finished file is not worth a restart.
+            let settled = e.started.is_some_and(|t| t.elapsed() > SLOW_GRACE);
+            let far_from_done = total_size == 0 || done.saturating_mul(10) < total_size.saturating_mul(9);
+            // Slow because the user capped it: the proxy would not help.
+            let capped = engine::Job::effective_limit(&self.limit, &e.own_limit);
+            let chosen = capped > 0 && (capped as f64) < SLOW_SPEED * 4.0;
+            if auto_proxy && running && !e.via_proxy && !e.download.is_recording() && settled && far_from_done && !chosen && e.speed < SLOW_SPEED {
+                let since = *e.slow_since.get_or_insert(now);
+                if now.duration_since(since) >= SLOW_FOR {
+                    e.via_proxy = true;
+                    e.restart();
+                }
+            } else {
+                e.slow_since = None;
+            }
         }
         let mut history = lock(&self.history);
         history.pop_front();
@@ -1258,19 +1644,25 @@ impl Manager {
     }
 }
 
+/// The list saved by the previous session. Entries this version cannot read (written by a newer
+/// RDM) are left out, not the whole list; an unreadable file is kept aside (`.bad`) rather than
+/// overwritten by the next save.
 fn load_entries() -> Vec<Entry> {
-    let stored: Vec<Stored> = fs::read(crate::settings::config_file(STORE))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
-    stored
+    let path = crate::settings::config_file(STORE);
+    let Ok(bytes) = fs::read(&path) else { return Vec::new() };
+    let Ok(values) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) else {
+        let _ = fs::copy(&path, with_suffix(&path, ".bad"));
+        return Vec::new();
+    };
+    values
         .into_iter()
+        .filter_map(|v| serde_json::from_value::<Stored>(v).ok())
         .map(|mut s| {
             // Interrupted by exit (quit, shutdown, crash): downloads pick up where they were, from
             // their resume point; a recording cannot continue without its browser tab.
             if *s.download.status() == Status::Running {
                 let _ = if s.download.is_recording() {
-                    s.download.fail("enregistrement interrompu (RDM fermé)")
+                    s.download.fail(tr!("enregistrement interrompu (RDM fermé)", "recording interrupted (RDM closed)"))
                 } else {
                     s.download.retry_later()
                 };
@@ -1302,18 +1694,6 @@ async fn remove_recording_leftovers(target: &Path) {
     }
 }
 
-fn sha256_file(path: &Path) -> std::io::Result<String> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        match file.read(&mut buf)? {
-            0 => break,
-            n => hasher.update(&buf[..n]),
-        }
-    }
-    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
-}
 
 /// Mark-of-the-Web, as browsers do: SmartScreen / Office Protected View then warn before running
 /// downloaded executables or macros. Zone only — the source URL is not recorded (privacy).
@@ -1323,29 +1703,39 @@ fn mark_from_internet(path: &Path) {
     }
 }
 
-/// Engine error → short French sentence for the user (no URLs: they may carry tokens).
+/// Engine error → a short sentence in the interface language (no URLs: they may carry tokens).
 fn describe(err: &engine::EngineError) -> String {
     use engine::EngineError as E;
     match err {
-        E::Http(e) if e.is_redirect() => "redirection refusée (boucle ou vers le réseau local)".into(),
+        E::Http(e) if e.is_redirect() => tr!("redirection refusée (boucle ou vers le réseau local)", "redirect refused (loop, or into the local network)").into(),
+        _ if err.is_certificate() => tr!(
+            "certificat du site non valide (clic droit › Accepter un certificat non valide, si vous faites confiance au site)",
+            "the site's certificate is not valid (right-click › Accept an invalid certificate, if you trust the site)"
+        )
+        .into(),
         E::Http(e) => match e.status().map(|s| s.as_u16()) {
-            Some(401 | 403) => "accès refusé par le serveur (lien expiré ou protégé)".into(),
-            Some(404) => "fichier introuvable (404)".into(),
-            Some(410) => "lien expiré (410)".into(),
-            Some(429) => "le serveur limite les connexions (429)".into(),
-            Some(s @ 500..=599) => format!("erreur du serveur ({s})"),
-            Some(s) => format!("le serveur a répondu {s}"),
-            None if e.is_timeout() => "délai dépassé, connexion trop lente".into(),
-            None if e.is_connect() => "connexion impossible au serveur".into(),
-            None => "connexion interrompue".into(),
+            Some(401) => tr!(
+                "identifiants requis (Paramètres › Identifiants des sites)",
+                "login required (Settings › Site logins)"
+            )
+            .into(),
+            Some(403) => tr!("accès refusé par le serveur (lien expiré ou protégé)", "access denied by the server (link expired or protected)").into(),
+            Some(404) => tr!("fichier introuvable (404)", "file not found (404)").into(),
+            Some(410) => tr!("lien expiré (410)", "link expired (410)").into(),
+            Some(429) => tr!("le serveur limite les connexions (429)", "the server limits connections (429)").into(),
+            Some(s @ 500..=599) => trf!("erreur du serveur ({s})", "server error ({s})"),
+            Some(s) => trf!("le serveur a répondu {s}", "the server answered {s}"),
+            None if e.is_timeout() => tr!("délai dépassé, connexion trop lente", "timed out, connection too slow").into(),
+            None if e.is_connect() => tr!("connexion impossible au serveur", "cannot connect to the server").into(),
+            None => tr!("connexion interrompue", "connection interrupted").into(),
         },
-        E::Io(e) => format!("erreur disque : {e}"),
-        E::RangeIgnored => "le serveur a renvoyé une plage incohérente".into(),
-        E::Empty => "le serveur n'a renvoyé aucune donnée (lien expiré ou protégé)".into(),
-        E::Truncated => "connexion coupée avant la fin".into(),
-        E::LocalNetwork => "bloqué : un contenu Internet visait votre réseau local".into(),
-        E::Playlist(m) => format!("flux vidéo : {m}"),
-        E::Mux(e) => format!("fusion audio/vidéo impossible : {e}"),
+        E::Io(e) => trf!("erreur disque : {e}", "disk error: {e}"),
+        E::RangeIgnored => tr!("le serveur a renvoyé une plage incohérente", "the server sent an inconsistent range").into(),
+        E::Empty => tr!("le serveur n'a renvoyé aucune donnée (lien expiré ou protégé)", "the server sent no data (link expired or protected)").into(),
+        E::Truncated => tr!("connexion coupée avant la fin", "connection cut before the end").into(),
+        E::LocalNetwork => tr!("bloqué : un contenu Internet visait votre réseau local", "blocked: Internet content pointing into your local network").into(),
+        E::Playlist(m) => trf!("flux vidéo : {m}", "video stream: {m}"),
+        E::Mux(e) => trf!("fusion audio/vidéo impossible : {e}", "cannot merge audio and video: {e}"),
     }
 }
 
@@ -1358,6 +1748,35 @@ fn to_header_map(pairs: &[(String, String)]) -> HeaderMap {
 
 pub fn header_map(req: &AddRequest) -> HeaderMap {
     to_header_map(&req.headers())
+}
+
+/// Where a new download of `name` goes, following the settings when a file of that name exists
+/// (`None`: skip it). Overwriting never follows a symbolic link (it could point anywhere), nor
+/// takes a name another download of the list will write.
+fn target_for(settings: &Settings, name: &str, taken: &[Entry], except: Option<DownloadId>) -> Option<PathBuf> {
+    let dir = settings.target_dir(name);
+    let path = dir.join(name);
+    match settings.existing {
+        ExistingFile::Rename => Some(unique_path(&dir, name, taken, except)),
+        ExistingFile::Skip if path.is_file() => None,
+        ExistingFile::Skip => Some(unique_path(&dir, name, taken, except)),
+        ExistingFile::Overwrite => {
+            let link = fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+            // Another download of the list still writing (or to write) that file keeps it: two
+            // transfers into one file would corrupt both. A completed one gives it up.
+            let planned = taken.iter().any(|e| {
+                e.download.target == path && Some(e.download.id) != except && *e.download.status() != Status::Completed
+            });
+            if link || planned || path.is_dir() {
+                return Some(unique_path(&dir, name, taken, except));
+            }
+            // Leftovers of an earlier, unrelated download of that name must not be resumed.
+            for suffix in cleanup_suffixes().filter(|s| !s.is_empty()) {
+                let _ = fs::remove_file(with_suffix(&path, suffix));
+            }
+            Some(path)
+        }
+    }
 }
 
 /// A free path for `name` in `dir`: neither on disk (with or without leftovers of an unfinished
@@ -1389,14 +1808,6 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sha256_of_known_content() {
-        let path = std::env::temp_dir().join(format!("rdm-sha-{}", std::process::id()));
-        fs::write(&path, b"abc").unwrap();
-        assert_eq!(sha256_file(&path).unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-        let _ = fs::remove_file(path);
-    }
 
     #[test]
     fn cleanup_covers_every_temporary_file() {

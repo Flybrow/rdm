@@ -27,6 +27,14 @@ directories = "6"
 rfd = "0.15"
 opener = { version = "0.8", features = ["reveal"] }
 sha2 = "0.11"
+md-5 = "0.11"
+sha1 = "0.11"
+# Update packages are signed (Ed25519) by the release workflow; RDM checks before installing.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+# Interface language from the system.
+sys-locale = "0.3"
+# Clipboard watching (links copied anywhere).
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 notify-rust = "4.18"
 # KSNI backend on Linux: pure-Rust D-Bus tray, no GTK / libappindicator needed.
 tray-icon = { version = "0.25", default-features = false, features = ["ksni"] }
@@ -34,7 +42,7 @@ tray-icon = { version = "0.25", default-features = false, features = ["ksni"] }
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
 raw-window-handle = "0.6"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security_Cryptography", "Win32_System_DataExchange", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

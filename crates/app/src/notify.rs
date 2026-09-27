@@ -42,14 +42,23 @@ pub fn completed(file_name: &str) {
     if now.saturating_sub(LAST.swap(now, Relaxed)) < QUIET_SECS {
         return;
     }
-    show("Téléchargement terminé", file_name);
+    show(crate::tr!("Téléchargement terminé", "Download complete"), file_name);
+}
+
+/// The finished file does not match the checksum the user gave (corrupted, or not the expected file).
+pub fn checksum_mismatch(file_name: &str) {
+    show(crate::tr!("Empreinte différente : fichier corrompu ?", "Checksum mismatch: corrupted file?"), file_name);
 }
 
 pub fn virustotal(file_name: &str, verdict: Result<&Report, String>) {
+    let (flagged, engines) = verdict.as_ref().map_or((0, 0), |r| (r.flagged(), r.engines()));
     let summary = match &verdict {
-        Ok(r) if r.flagged() == 0 => format!("VirusTotal : aucune menace ({}/{})", r.flagged(), r.engines()),
-        Ok(r) => format!("VirusTotal : {} détection(s) sur {}", r.flagged(), r.engines()),
-        Err(_) => "VirusTotal : analyse impossible".to_owned(),
+        Ok(r) if r.flagged() == 0 => crate::trf!("VirusTotal : aucune menace ({flagged}/{engines})", "VirusTotal: no threat ({flagged}/{engines})"),
+        Ok(_) => {
+            let flagged = crate::i18n::count(flagged, ("détection", "détections"), ("detection", "detections"));
+            crate::trf!("VirusTotal : {flagged} sur {engines}", "VirusTotal: {flagged} out of {engines}")
+        }
+        Err(_) => crate::tr!("VirusTotal : analyse impossible", "VirusTotal: analysis failed").to_owned(),
     };
     let body = match verdict {
         Err(reason) => format!("{file_name} — {reason}"),

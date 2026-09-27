@@ -4,8 +4,9 @@
 //! Defences:
 //! - `Origin`: browsers always set it on cross-origin requests; only *our* extension ID passes
 //!   (pinned by the manifest `key`), plus local non-browser tools (no `Origin`, already trusted);
-//!   Firefox extensions have a random per-install origin: accepted once the user approved it
-//!   (Firefox sends `Origin` on POST only: the extension pairs with `POST /ping` when it starts);
+//!   Firefox extensions have a random per-install origin: paired by the native connector (see
+//!   `native`, a local program: `POST /pair`), or else accepted once the user approved it (Firefox
+//!   sends `Origin` on POST only: the extension asks with `POST /ping` when it starts);
 //! - `Host`: must be the loopback address, which defeats DNS rebinding;
 //! - JSON bodies (force a CORS preflight we never answer), 64 KiB cap, http(s) URLs only.
 
@@ -51,6 +52,7 @@ pub async fn serve(manager: Arc<Manager>, listener: TcpListener) {
         .route("/check", post(check))
         .route("/show", post(show))
         .route("/quit", post(quit))
+        .route("/pair", post(pair))
         .route("/record/start", post(record_start))
         .route("/record/{token}/progress", post(record_progress))
         .route("/record/{token}/finish", post(record_finish))
@@ -64,10 +66,9 @@ pub async fn serve(manager: Arc<Manager>, listener: TcpListener) {
 
 fn guard(manager: &Manager, headers: &HeaderMap) -> Result<(), StatusCode> {
     guard_with(headers, |origin| manager.firefox_allowed(origin))?;
-    // Which browser the extension runs in (the extension window shows the connected ones).
-    if headers.contains_key(ORIGIN)
-        && let Some(browser) = headers.get(BROWSER).and_then(|v| v.to_str().ok())
-    {
+    // Which browser the extension runs in (the extension window shows the connected ones); sent
+    // by the extension itself or its native connector. A web page cannot set this header.
+    if let Some(browser) = headers.get(BROWSER).and_then(|v| v.to_str().ok()) {
         manager.browser_seen(browser);
     }
     Ok(())
@@ -139,7 +140,8 @@ async fn probe(
         return Err(StatusCode::BAD_REQUEST);
     }
     let request_headers = manager::header_map(&req);
-    let info = engine::hls_info(manager.client(), &req.url, &request_headers);
+    let client = manager.client();
+    let info = engine::hls_info(&client, &req.url, &request_headers);
     match tokio::time::timeout(PROBE_TIMEOUT, info).await {
         Ok(Ok(info)) => Ok(Json(info)),
         Ok(Err(_)) => Err(StatusCode::BAD_GATEWAY),
@@ -167,13 +169,13 @@ async fn check(
         return Err(StatusCode::BAD_REQUEST);
     }
     let request_headers = manager::header_map(&req);
+    let client = manager.client();
     let verdict = async {
-        let p = engine::probe(manager.client(), &req.url, &request_headers).await?;
+        let p = engine::probe(&client, &req.url, &request_headers).await?;
         // Some servers (YouTube without its anti-bot token) serve the beginning and refuse the rest:
         // the last byte must be reachable too.
         if let Some(size) = p.size.filter(|&s| s > 1 && p.ranges) {
-            let last = manager
-                .client()
+            let last = client
                 .get(req.url.clone())
                 .headers(request_headers.clone())
                 .header(axum::http::header::RANGE.as_str(), format!("bytes={}-{}", size - 1, size - 1))
@@ -273,7 +275,24 @@ async fn record_cancel(State(manager): State<Arc<Manager>>, headers: HeaderMap, 
     if let Err(status) = guard(&manager, &headers) {
         return status;
     }
-    if manager.cancel_recording(&token, "enregistrement annulé") { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+    if manager.cancel_recording(&token, crate::tr!("enregistrement annulé", "recording cancelled")) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+}
+
+#[derive(Deserialize)]
+struct Pair {
+    origin: String,
+}
+
+/// The native connector pairs its Firefox extension (see `native`). Local programs only, like
+/// `/quit`: a browser always sends `Origin` with a POST.
+async fn pair(State(manager): State<Arc<Manager>>, headers: HeaderMap, Json(p): Json<Pair>) -> StatusCode {
+    if headers.contains_key(ORIGIN) {
+        return StatusCode::FORBIDDEN;
+    }
+    if let Err(status) = guard(&manager, &headers) {
+        return status;
+    }
+    if manager.pair_firefox(&p.origin) { StatusCode::NO_CONTENT } else { StatusCode::BAD_REQUEST }
 }
 
 /// `rdm --quit` (the installer, before replacing files): quit as from the tray's "Quitter". Local
@@ -300,10 +319,14 @@ async fn show(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> Status
     StatusCode::NO_CONTENT
 }
 
-/// Second launch: hand the URL (or just "show yourself") to the running instance.
+/// For talking to the running RDM: never through a proxy (a system proxy would get 127.0.0.1).
+fn local_client() -> Option<engine::Client> {
+    engine::client_with(&engine::ClientOptions { route: engine::Route::Direct, insecure: false }).ok()
+}
+
 /// `rdm --quit`: asks a running RDM to quit and waits (bounded) until it is gone. Starts nothing.
 pub async fn quit_running() {
-    let Ok(client) = engine::client() else { return };
+    let Some(client) = local_client() else { return };
     let asked = client
         .post(format!("http://127.0.0.1:{BRIDGE_PORT}/quit"))
         .timeout(Duration::from_secs(5))
@@ -322,9 +345,10 @@ pub async fn quit_running() {
     }
 }
 
-/// `true` when a running RDM took the request.
+/// Second launch: hands the URL (or just "show yourself") to the running instance; `true` when it
+/// took the request.
 pub async fn forward(url: Option<&Url>) -> bool {
-    let Ok(client) = engine::client() else { return false };
+    let Some(client) = local_client() else { return false };
     let base = format!("http://127.0.0.1:{BRIDGE_PORT}");
     let request = match url {
         Some(url) => client

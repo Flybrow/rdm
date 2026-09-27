@@ -129,7 +129,7 @@
     const video = p?.querySelector("video");
     if (!p?.getAvailableQualityLevels || !video) return;
     if (videoId() !== job.videoId) {
-      post({ type: "abort", reason: "la page a changé de vidéo" });
+      post({ type: "abort", reason: "video-changed" }); // translated by content.js
       return stop();
     }
     if (isAd()) return post({ type: "progress", ad: true }); // not recorded; the banner says so

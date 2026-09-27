@@ -3,11 +3,11 @@
      in-app updates install silently. A newer MSI replaces an older one (MajorUpgrade).
      Build: powershell -ExecutionPolicy Bypass -File packaging\windows\build-msi.ps1 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi" xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
-  <Product Id="*" Name="RDM" Language="1036" Codepage="1252" Version="$(var.Version)"
+  <Product Id="*" Name="RDM" Language="1033" Codepage="1252" Version="$(var.Version)"
            Manufacturer="RDM" UpgradeCode="7F3C2A91-5B64-4E0B-9D2A-6C8E1F4B3A77">
     <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" InstallPrivileges="limited"
-             Description="RDM — gestionnaire de téléchargements" Platform="x64" />
-    <MajorUpgrade DowngradeErrorMessage="Une version plus récente de RDM est déjà installée." />
+             Description="RDM - Rust Download Manager" Platform="x64" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of RDM is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <Icon Id="rdm.ico" SourceFile="$(var.Assets)\rdm.ico" />
@@ -38,18 +38,31 @@
         <RemoveRegistryKey Root="HKCU" Key="Software\Classes\AppUserModelId\RDM.DownloadManager" Action="removeOnUninstall" />
       </Component>
       <Component Id="Shortcut" Guid="A4D2B7E9-1C58-4F3A-8E6D-0B9C2F7A5E13" Win64="yes">
-        <Shortcut Id="StartMenu" Directory="ProgramMenuFolder" Name="RDM" Description="Gestionnaire de téléchargements"
+        <Shortcut Id="StartMenu" Directory="ProgramMenuFolder" Name="RDM" Description="Download manager"
                   Target="[INSTALLDIR]rdm.exe" WorkingDirectory="INSTALLDIR" Icon="rdm.ico">
           <ShortcutProperty Key="System.AppUserModel.ID" Value="RDM.DownloadManager" />
         </Shortcut>
         <RegistryValue Root="HKCU" Key="Software\RDM" Name="shortcut" Type="integer" Value="1" KeyPath="yes" />
       </Component>
       <Component Id="DesktopShortcut" Guid="49FD1533-B893-42AA-A0CF-7BBD8C878B2A" Win64="yes">
-        <Shortcut Id="Desktop" Directory="DesktopFolder" Name="RDM" Description="Gestionnaire de téléchargements"
+        <Shortcut Id="Desktop" Directory="DesktopFolder" Name="RDM" Description="Download manager"
                   Target="[INSTALLDIR]rdm.exe" WorkingDirectory="INSTALLDIR" Icon="rdm.ico">
           <ShortcutProperty Key="System.AppUserModel.ID" Value="RDM.DownloadManager" />
         </Shortcut>
         <RegistryValue Root="HKCU" Key="Software\RDM" Name="desktop" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <!-- The browser extension's connector (native messaging host): RDM registers it with the
+           browsers at every start (see native.rs); the registrations go with RDM. -->
+      <Component Id="NativeHost" Guid="6DF21176-B17D-49D1-B459-10D853A12A63" Win64="yes">
+        <RegistryValue Root="HKCU" Key="Software\RDM" Name="native" Type="integer" Value="1" KeyPath="yes" />
+        <RemoveRegistryKey Root="HKCU" Key="Software\Google\Chrome\NativeMessagingHosts\rdm.bridge" Action="removeOnUninstall" />
+        <RemoveRegistryKey Root="HKCU" Key="Software\Chromium\NativeMessagingHosts\rdm.bridge" Action="removeOnUninstall" />
+        <RemoveRegistryKey Root="HKCU" Key="Software\Microsoft\Edge\NativeMessagingHosts\rdm.bridge" Action="removeOnUninstall" />
+        <RemoveRegistryKey Root="HKCU" Key="Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\rdm.bridge" Action="removeOnUninstall" />
+        <RemoveRegistryKey Root="HKCU" Key="Software\Vivaldi\NativeMessagingHosts\rdm.bridge" Action="removeOnUninstall" />
+        <RemoveRegistryKey Root="HKCU" Key="Software\Mozilla\NativeMessagingHosts\rdm.bridge" Action="removeOnUninstall" />
+        <RemoveRegistryKey Root="HKCU" Key="Software\Waterfox\NativeMessagingHosts\rdm.bridge" Action="removeOnUninstall" />
+        <RemoveRegistryKey Root="HKCU" Key="Software\LibreWolf\NativeMessagingHosts\rdm.bridge" Action="removeOnUninstall" />
       </Component>
     </DirectoryRef>
 
@@ -57,13 +70,15 @@
       <ComponentRef Id="App" />
       <ComponentRef Id="Shortcut" />
       <ComponentRef Id="DesktopShortcut" />
+      <ComponentRef Id="NativeHost" />
     </Feature>
 
     <!-- A running RDM must be gone before InstallValidate: otherwise Windows Installer reports
          success but leaves the old rdm.exe in place until the next reboot (the file is in use).
          First the installed rdm.exe is asked to quit (it closes cleanly, downloads saved: RDM 0.2.1
          and later; it waits until RDM is gone), then whatever is left (older versions do not know
-         how to quit on request) is ended, without a console window. -->
+         how to quit on request, and the browsers' connectors run the same rdm.exe) is ended,
+         without a console window. -->
     <!-- Only an RDM installed by such an installer (0.2.1 and later) is asked: an older rdm.exe
          does not know the option and would start instead — the installation would wait forever. -->
     <Property Id="RDM_QUITS">

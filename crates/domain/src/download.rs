@@ -56,6 +56,18 @@ pub struct Download {
     pub audio: Option<Url>,
     #[serde(default)]
     pub source: Source,
+    /// Named queue it waits in (0 = the main queue).
+    #[serde(default)]
+    pub queue: u32,
+    /// Its own speed cap in KiB/s, on top of the global one (0 = none).
+    #[serde(default)]
+    pub speed_limit_kib: u32,
+    /// Expected checksum (`md5:…`, `sha1:…`, `sha256:…`, `sha512:…`), verified once complete.
+    #[serde(default)]
+    pub checksum: Option<String>,
+    /// Accept an invalid TLS certificate for this download only (the user's explicit choice).
+    #[serde(default)]
+    pub insecure: bool,
     status: Status,
 }
 
@@ -68,6 +80,10 @@ impl Download {
             connections: connections.clamp(1, crate::MAX_CONNECTIONS),
             audio: None,
             source: Source::Http,
+            queue: 0,
+            speed_limit_kib: 0,
+            checksum: None,
+            insecure: false,
             status: Status::Queued,
         }
     }

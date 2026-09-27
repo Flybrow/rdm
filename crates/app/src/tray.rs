@@ -15,12 +15,17 @@ pub enum Command {
     Quit,
 }
 
-const ITEMS: [(&str, &str, Command); 4] = [
-    ("show", "Ouvrir RDM", Command::Show),
-    ("resume", "Tout reprendre", Command::ResumeAll),
-    ("pause", "Tout suspendre", Command::PauseAll),
-    ("quit", "Quitter", Command::Quit),
-];
+const ITEMS: [(&str, Command); 4] = [("show", Command::Show), ("resume", Command::ResumeAll), ("pause", Command::PauseAll), ("quit", Command::Quit)];
+
+/// A menu entry's text in the interface language.
+fn label(command: Command) -> &'static str {
+    match command {
+        Command::Show => crate::tr!("Ouvrir RDM", "Open RDM"),
+        Command::ResumeAll => crate::tr!("Tout reprendre", "Resume all"),
+        Command::PauseAll => crate::tr!("Tout suspendre", "Pause all"),
+        Command::Quit => crate::tr!("Quitter", "Quit"),
+    }
+}
 
 const IDLE_TIP: &str = "RDM";
 /// On Linux every tooltip change is a blocking D-Bus round trip: at most one per interval.
@@ -28,6 +33,9 @@ const TIP_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct Tray {
     icon: TrayIcon,
+    items: Vec<MenuItem>,
+    /// The language the menu is written in.
+    english: bool,
     tip: String,
     tip_at: Option<Instant>,
 }
@@ -38,13 +46,13 @@ pub struct Tray {
 /// `on_command` runs on the tray's own thread on Linux: it must not block, nor touch the tray.
 pub fn create(rgba: Vec<u8>, size: u32, on_command: impl Fn(Command) + Send + Sync + Clone + 'static) -> Option<Tray> {
     let menu = Menu::new();
-    let items: Vec<MenuItem> = ITEMS.iter().map(|(id, label, _)| MenuItem::with_id(MenuId::new(id), label, true, None)).collect();
+    let items: Vec<MenuItem> = ITEMS.iter().map(|(id, command)| MenuItem::with_id(MenuId::new(id), label(*command), true, None)).collect();
     menu.append_items(&[&items[0], &PredefinedMenuItem::separator(), &items[1], &items[2], &PredefinedMenuItem::separator(), &items[3]])
         .ok()?;
 
     let on_menu = on_command.clone();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-        if let Some((_, _, command)) = ITEMS.iter().find(|(id, ..)| event.id == *id) {
+        if let Some((_, command)) = ITEMS.iter().find(|(id, _)| event.id == *id) {
             on_menu(*command);
         }
     }));
@@ -66,10 +74,21 @@ pub fn create(rgba: Vec<u8>, size: u32, on_command: impl Fn(Command) + Send + Sy
         .with_icon(Icon::from_rgba(rgba, size, size).ok()?)
         .build()
         .ok()?;
-    Some(Tray { icon, tip: IDLE_TIP.to_owned(), tip_at: None })
+    Some(Tray { icon, items, english: crate::i18n::english(), tip: IDLE_TIP.to_owned(), tip_at: None })
 }
 
 impl Tray {
+    /// The interface language changed: the menu follows.
+    pub fn relabel(&mut self) {
+        let english = crate::i18n::english();
+        if english != self.english {
+            self.english = english;
+            for (item, (_, command)) in self.items.iter().zip(ITEMS) {
+                item.set_text(label(command));
+            }
+        }
+    }
+
     /// `None` = idle: shown at once. Live transfer summaries are throttled.
     pub fn set_tooltip(&mut self, summary: Option<String>) {
         let idle = summary.is_none();

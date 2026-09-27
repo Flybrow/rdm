@@ -65,14 +65,20 @@ impl Category {
             .map_or(Self::Other, |(c, _)| *c)
     }
 
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Video => "Vidéos",
-            Self::Music => "Musique",
-            Self::Archive => "Compressés",
-            Self::Program => "Programmes",
-            Self::Document => "Documents",
-            Self::Other => "Autres",
+    /// Display (and default folder) name, in English or French.
+    pub const fn label(self, english: bool) -> &'static str {
+        match (self, english) {
+            (Self::Video, false) => "Vidéos",
+            (Self::Video, true) => "Videos",
+            (Self::Music, false) => "Musique",
+            (Self::Music, true) => "Music",
+            (Self::Archive, false) => "Compressés",
+            (Self::Archive, true) => "Archives",
+            (Self::Program, false) => "Programmes",
+            (Self::Program, true) => "Programs",
+            (Self::Document, _) => "Documents",
+            (Self::Other, false) => "Autres",
+            (Self::Other, true) => "Other",
         }
     }
 }
@@ -141,7 +147,7 @@ mod tests {
         assert_eq!(Category::of("README"), Category::Other);
     }
 
-    /// Regression: a `#` in a title was taken for a URL fragment → "Autres" instead of "Vidéos".
+    /// Regression: a `#` in a title was taken for a URL fragment → "Other" instead of "Videos".
     #[test]
     fn hash_and_question_mark_in_file_names() {
         assert_eq!(Category::of("Chine–USA _ terres rares #octogone93 (1080p).mp4"), Category::Video);

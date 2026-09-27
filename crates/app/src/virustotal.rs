@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::io::ReaderStream;
 
+use crate::{tr, trf};
+
 /// VirusTotal refuses larger files: RDM offers no analysis for them.
 pub const MAX_UPLOAD: u64 = 650_000_000;
 const DIRECT_UPLOAD_MAX: u64 = 32_000_000;
@@ -93,25 +95,23 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BadKey => f.write_str("clé API VirusTotal refusée : vérifiez-la dans les paramètres"),
-            Self::Quota => f.write_str("quota de l'API VirusTotal atteint, réessayez plus tard"),
-            Self::TooLarge => f.write_str("fichier trop volumineux pour VirusTotal (650 Mo au maximum)"),
-            Self::Status(s) => write!(f, "VirusTotal a répondu {s}"),
-            Self::Network => f.write_str("VirusTotal est injoignable (connexion)"),
-            Self::Io => f.write_str("fichier illisible"),
-            Self::Timeout => f.write_str("VirusTotal n'a pas terminé l'analyse à temps"),
-            Self::Unexpected => f.write_str("réponse inattendue de VirusTotal"),
+            Self::BadKey => f.write_str(tr!("clé API VirusTotal refusée : vérifiez-la dans les paramètres", "VirusTotal API key refused: check it in the settings")),
+            Self::Quota => f.write_str(tr!("quota de l'API VirusTotal atteint, réessayez plus tard", "VirusTotal API quota reached, try again later")),
+            Self::TooLarge => f.write_str(tr!("fichier trop volumineux pour VirusTotal (650 Mo au maximum)", "file too large for VirusTotal (650 MB at most)")),
+            Self::Status(s) => f.write_str(&trf!("VirusTotal a répondu {s}", "VirusTotal answered {s}")),
+            Self::Network => f.write_str(tr!("VirusTotal est injoignable (connexion)", "VirusTotal cannot be reached (connection)")),
+            Self::Io => f.write_str(tr!("fichier illisible", "unreadable file")),
+            Self::Timeout => f.write_str(tr!("VirusTotal n'a pas terminé l'analyse à temps", "VirusTotal did not finish the analysis in time")),
+            Self::Unexpected => f.write_str(tr!("réponse inattendue de VirusTotal", "unexpected answer from VirusTotal")),
         }
     }
 }
 
-/// A separate client from the download engine's: uploads can take long (no read timeout), and
-/// HTTP/2 is fine here.
-pub fn client() -> reqwest::Result<Client> {
-    Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .user_agent(concat!("RDM/", env!("CARGO_PKG_VERSION")))
-        .build()
+/// A separate client from the download engine's (also used for GitHub): uploads can take long (no
+/// read timeout), and HTTP/2 is fine here. Same route as downloads (the proxy of the settings).
+pub fn client(route: &engine::Route) -> reqwest::Result<Client> {
+    let builder = Client::builder().connect_timeout(Duration::from_secs(15)).user_agent(concat!("RDM/", env!("CARGO_PKG_VERSION")));
+    engine::route(builder, route)?.build()
 }
 
 pub type OnStage = Arc<dyn Fn(Stage) + Send + Sync>;
@@ -305,7 +305,11 @@ mod tests {
 
     #[test]
     fn errors_read_as_sentences() {
+        let _one_at_a_time = crate::i18n::TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::i18n::set(crate::i18n::Language::French);
         assert!(Error::TooLarge.to_string().contains("650 Mo"));
         assert_eq!(Error::Status(503).to_string(), "VirusTotal a répondu 503");
+        crate::i18n::set(crate::i18n::Language::English);
+        assert_eq!(Error::Status(503).to_string(), "VirusTotal answered 503");
     }
 }

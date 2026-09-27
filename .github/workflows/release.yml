@@ -90,6 +90,34 @@ jobs:
             fi
           fi
 
+      # RDM installs an update only if its package carries a valid Ed25519 signature made with this
+      # key (repository secret RDM_SIGNING_KEY, a PEM private key; its public half is compiled into
+      # RDM, see crates/app/src/update.rs). What is signed binds the package to its version, so an
+      # old package cannot be replayed as a new one. Tagged builds refuse to ship without it.
+      - name: Sign the update packages
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          RDM_SIGNING_KEY: ${{ secrets.RDM_SIGNING_KEY }}
+        run: |
+          [ -n "$RDM_SIGNING_KEY" ] || { echo "::error::secret RDM_SIGNING_KEY is missing: RDM would refuse this release's updates"; exit 1; }
+          key="$RUNNER_TEMP/rdm-signing.pem"
+          trap 'rm -f "$key"' EXIT
+          (umask 077 && printf '%s\n' "$RDM_SIGNING_KEY" >"$key")
+          # The key must be the one RDM trusts.
+          public=$(openssl pkey -in "$key" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
+          grep -q "$public" crates/app/src/update.rs || { echo "::error::RDM_SIGNING_KEY does not match update.rs's PUBLIC_KEY"; exit 1; }
+          openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/rdm-signing.pub"
+          version=${GITHUB_REF#refs/tags/v}
+          statement="$RUNNER_TEMP/statement"
+          for f in dist/*.msi dist/*.deb dist/*.rpm dist/*.tar.gz; do
+            [ -e "$f" ] || continue
+            # Exactly update.rs's signed_statement().
+            printf 'rdm-update\nversion=%s\nname=%s\nsha256=%s\n' "$version" "$(basename "$f")" "$(sha256sum "$f" | cut -d' ' -f1)" >"$statement"
+            openssl pkeyutl -sign -inkey "$key" -rawin -in "$statement" -out "$f.sig"
+            openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/rdm-signing.pub" -rawin -in "$statement" -sigfile "$f.sig"
+          done
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -106,3 +134,4 @@ jobs:
             dist/*.tar.gz
             dist/*.xpi
             dist/*.zip
+            dist/*.sig
