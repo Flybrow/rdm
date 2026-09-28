@@ -20,7 +20,8 @@ $exe = @("$PSScriptRoot\rdm.exe", "$PSScriptRoot\..\..\target\release\rdm.exe") 
 # A running RDM closes cleanly first (downloads saved), asked by the new binary — an older one
 # would not know the option; whatever is left (browser connectors included) is ended.
 if ($exe) { & $exe --quit | Out-Null }
-Get-Process rdm -ErrorAction SilentlyContinue | Stop-Process -Force
+# Another account's RDM (fast user switching) cannot be ended from here: not a reason to stop.
+Get-Process rdm -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
 if ($Uninstall) {
     Remove-Item (@($dir) + $shortcuts) -Recurse -Force -ErrorAction SilentlyContinue

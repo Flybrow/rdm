@@ -127,6 +127,9 @@ pub struct Entry {
     slow_since: Option<Instant>,
     /// Stopped to start again right away (new route, new link, certificate choice).
     restart: bool,
+    /// Its target was an existing file, to overwrite ("overwrite" in the settings): removing the
+    /// download must not take that file along before the transfer wrote over it.
+    replaces: bool,
 }
 
 /// Checking a finished file against the checksum the user gave.
@@ -205,6 +208,7 @@ impl Entry {
             started: None,
             slow_since: None,
             restart: false,
+            replaces: false,
         };
         entry.named();
         entry
@@ -299,7 +303,7 @@ impl Entry {
         let (downloaded, total, _) = self.progress.snapshot();
         let headers = self.headers.iter().filter(|(k, _)| !SECRET_HEADERS.contains(&k.as_str())).cloned().collect();
         let scan = if let Scan::Done(report) = &self.scan { Some(report.clone()) } else { None };
-        Stored { download: self.download.clone(), headers, downloaded, total, sha256: self.sha256.clone(), scan }
+        Stored { download: self.download.clone(), headers, downloaded, total, sha256: self.sha256.clone(), scan, replaces: self.replaces }
     }
 }
 
@@ -355,6 +359,8 @@ struct Stored {
     /// Last VirusTotal verdict: the badge survives restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     scan: Option<Report>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    replaces: bool,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -505,6 +511,9 @@ fn is_firefox_origin(origin: &str) -> bool {
 
 impl Manager {
     pub fn new(rt: Handle, fallback: Client) -> Arc<Self> {
+        if let Some(dir) = crate::settings::config_file(STORE).parent() {
+            let _ = crate::settings::create_private_dir(dir);
+        }
         let settings = Settings::load();
         crate::i18n::set(settings.language);
         let limit = Arc::new(RateLimit::default());
@@ -838,7 +847,7 @@ impl Manager {
 
     /// Name from the server; HLS gets the extension of what will actually be written.
     async fn suggest_name(&self, url: &Url, headers: &HeaderMap) -> Option<String> {
-        let client = self.client();
+        let client = self.client(url).await;
         // The site's saved login too: without it a protected server only answers 401.
         let mut headers = headers.clone();
         self.add_login(url, &mut headers);
@@ -864,6 +873,7 @@ impl Manager {
         {
             match target_for(&settings, &name, &entries, Some(id)) {
                 Some(target) => {
+                    entries[i].replaces = target.is_file();
                     entries[i].download.target = target;
                     entries[i].named();
                 }
@@ -920,15 +930,15 @@ impl Manager {
             }
             if delete_file || *e.download.status() != Status::Completed {
                 let this = self.clone();
-                let target = e.download.target.clone();
+                let (target, replaces) = (e.download.target.clone(), e.replaces);
                 self.rt.spawn(async move {
                     // Wait for the task to stop writing (bounded), then clean up.
                     let deadline = Instant::now() + Duration::from_secs(10);
                     while lock(&this.busy).contains(&id) && Instant::now() < deadline {
                         tokio::time::sleep(Duration::from_millis(50)).await;
                     }
-                    for suffix in cleanup_suffixes() {
-                        let _ = tokio::fs::remove_file(with_suffix(&target, suffix)).await;
+                    for path in leftovers(&target, delete_file, replaces) {
+                        let _ = tokio::fs::remove_file(path).await;
                     }
                     remove_recording_leftovers(&target).await;
                 });
@@ -1219,6 +1229,7 @@ impl Manager {
         let Some(r) = lock(&self.recordings).remove(token) else { return false };
         let this = self.clone();
         self.inflight.fetch_add(1, AcqRel); // quitting waits (bounded) for the merge
+        lock(&self.busy).insert(r.id); // so does removing it: its files are being written
         self.rt.spawn_blocking(move || {
             let result = match r.best_source() {
                 Some(ms) => engine::mux::merge(&r.part(ms, Track::Video), &r.part(ms, Track::Audio), &r.target)
@@ -1242,6 +1253,7 @@ impl Manager {
                     Err(reason) => e.download.fail(reason),
                 };
             });
+            lock(&this.busy).remove(&r.id);
             this.inflight.fetch_sub(1, AcqRel);
             if let Some(name) = finished
                 && this.with_settings(|s| s.notify)
@@ -1357,7 +1369,7 @@ impl Manager {
         self.rt.spawn(async move {
             this.add_login(&job.url, &mut job.headers);
             let before = progress.downloaded.load(Relaxed);
-            let result = match this.client_for(this.route(via_proxy), insecure) {
+            let result = match this.client_for_url(&job.url, via_proxy, insecure).await {
                 Ok(client) => Ok(engine::run(&client, &job, progress.clone(), cancel).await),
                 Err(reason) => Err(reason),
             };
@@ -1426,7 +1438,7 @@ impl Manager {
         };
         let this = self.clone();
         self.rt.spawn(async move {
-            let size = match this.client_for(this.route(via_proxy), insecure) {
+            let size = match this.client_for_url(&url, via_proxy, insecure).await {
                 Ok(client) => engine::probe_once(&client, &url, &headers).await.ok().and_then(|p| p.size),
                 Err(_) => None,
             };
@@ -1510,11 +1522,14 @@ impl Manager {
             };
             target
         };
+        // Only "overwrite" keeps the name of an existing file.
+        let replaces = target.is_file();
         let mut download = Download::new(url, target, settings.connections);
         download.audio = audio;
         let id = download.id;
         let mut entry = Entry::new(download, headers, 0, 0);
         entry.resolving = resolving;
+        entry.replaces = replaces;
         entry.added = Some(Instant::now());
         entries.push(entry);
         drop(entries);
@@ -1670,6 +1685,7 @@ fn load_entries() -> Vec<Entry> {
             let mut entry = Entry::new(s.download, s.headers, s.downloaded, s.total);
             entry.sha256 = s.sha256;
             entry.scan = s.scan.map_or(Scan::None, Scan::Done);
+            entry.replaces = s.replaces;
             entry
         })
         .collect()
@@ -1682,16 +1698,35 @@ fn cleanup_suffixes() -> impl Iterator<Item = &'static str> {
         .chain(engine::PART_SUFFIXES)
 }
 
+/// What removing an unfinished download (or deleting its file) erases: its temporary files, and
+/// the file itself — unless it existed before ("overwrite") and the transfer has not written over
+/// it yet (no resume point next to it: not started, failed before its first byte, or a split
+/// download whose parts are still apart). That file is the user's, not this download's.
+fn leftovers(target: &Path, delete_file: bool, replaces: bool) -> Vec<PathBuf> {
+    let untouched = replaces && !with_suffix(target, engine::STATE_SUFFIX).exists();
+    let keep_file = !delete_file && untouched;
+    cleanup_suffixes().filter(|s| !(keep_file && s.is_empty())).map(|s| with_suffix(target, s)).collect()
+}
+
 /// Chunks of an interrupted recording (`<name>.rec<N>.<track>`), e.g. left by a previous session.
 async fn remove_recording_leftovers(target: &Path) {
     let (Some(dir), Some(name)) = (target.parent(), target.file_name()) else { return };
-    let prefix = format!("{}.rec", name.to_string_lossy());
+    let name = name.to_string_lossy();
     let Ok(mut entries) = tokio::fs::read_dir(dir).await else { return };
     while let Ok(Some(entry)) = entries.next_entry().await {
-        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+        if is_recording_part(&name, &entry.file_name().to_string_lossy()) {
             let _ = tokio::fs::remove_file(entry.path()).await;
         }
     }
+}
+
+/// `<name>.rec<digits>.video` / `.audio` exactly (see `Recording::part`): never another file
+/// that merely starts the same way.
+fn is_recording_part(name: &str, file: &str) -> bool {
+    file.strip_prefix(name)
+        .and_then(|rest| rest.strip_prefix(".rec"))
+        .and_then(|rest| rest.split_once('.'))
+        .is_some_and(|(ms, track)| !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()) && matches!(track, "video" | "audio"))
 }
 
 
@@ -1815,5 +1850,36 @@ mod tests {
         for s in [".rdm", ".video.part", ".video.part.ok", ".audio.part.rdm", ".mux.tmp"] {
             assert!(all.contains(&s), "{s}");
         }
+    }
+
+    #[test]
+    fn only_recording_chunks_count_as_leftovers() {
+        let target = PathBuf::from("dl").join("Clip.mp4");
+        let recording = Recording { id: DownloadId::new(), target, parts: HashMap::new(), last_data: Instant::now() };
+        let part = recording.part(3, Track::Audio);
+        assert!(is_recording_part("Clip.mp4", &part.file_name().unwrap().to_string_lossy()));
+        assert!(is_recording_part("Clip.mp4", "Clip.mp4.rec12.video"));
+        for other in ["Clip.mp4.recipe.txt", "Clip.mp4.rec.video", "Clip.mp4.rec1.video.bak", "Clip.mp4.rec1x.audio", "Clip.mp4"] {
+            assert!(!is_recording_part("Clip.mp4", other), "{other}");
+        }
+    }
+
+    /// Regression: with "overwrite", removing a download that failed before writing anything
+    /// deleted the user's existing file of that name.
+    #[test]
+    fn removal_spares_a_file_the_download_has_not_written_over() {
+        let dir = std::env::temp_dir().join(format!("rdm-leftovers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("report.pdf");
+        std::fs::write(&target, b"the user's file").unwrap();
+        let erases_file = |delete_file, replaces| leftovers(&target, delete_file, replaces).contains(&target);
+
+        assert!(!erases_file(false, true), "not written over yet: kept");
+        assert!(erases_file(true, true), "\"delete the file\" deletes it");
+        assert!(erases_file(false, false), "a partial file of this download's own");
+        std::fs::write(with_suffix(&target, engine::STATE_SUFFIX), b"[]").unwrap();
+        assert!(erases_file(false, true), "the transfer has written over it: a partial file now");
+        assert!(leftovers(&target, false, true).contains(&with_suffix(&target, engine::STATE_SUFFIX)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

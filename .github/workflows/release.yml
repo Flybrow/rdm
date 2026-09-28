@@ -6,9 +6,13 @@ on:
     tags: ["v*"]
   pull_request:
 
+# Least privilege: building only reads the repository. Only the `release` job (tags) may write,
+# and it runs no third-party code (see there).
 permissions:
-  contents: write
+  contents: read
 
+# Supply chain: every action is pinned to a commit (a moved tag cannot swap its code), and every
+# tool fetched at build time to an exact version.
 jobs:
   build:
     strategy:
@@ -21,11 +25,14 @@ jobs:
             artifact: rdm-linux
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false # build scripts and packages never see the token
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch, 2026-09-03
+        with:
+          toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -40,19 +47,19 @@ jobs:
         run: |
           sh packaging/firefox/build.sh
           sh packaging/chromium/build.sh
-          npx --yes web-ext@8 lint --source-dir target/firefox
+          npx --yes web-ext@8.57.0 lint --source-dir target/firefox
 
       - name: Dependency audit (RustSec)
         if: runner.os == 'Linux'
-        run: cargo install cargo-audit --locked && cargo audit
+        run: cargo install cargo-audit --version 0.22.2 --locked && cargo audit
 
       - name: Debian package
         if: runner.os == 'Linux'
-        run: cargo install cargo-deb --locked && cargo deb -p rdm --no-build
+        run: cargo install cargo-deb --version 3.8.0 --locked && cargo deb -p rdm --no-build
 
       - name: Fedora package
         if: runner.os == 'Linux'
-        run: cargo install cargo-generate-rpm --locked && cargo generate-rpm -p crates/app
+        run: cargo install cargo-generate-rpm --version 0.21.0 --locked && cargo generate-rpm -p crates/app
 
       - name: Windows installer (WiX 3)
         if: runner.os == 'Windows'
@@ -60,12 +67,17 @@ jobs:
         run: |
           $zip = "$env:RUNNER_TEMP\wix.zip"
           Invoke-WebRequest https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip -OutFile $zip
+          # The archive of the WiX 3.14.1 release: anything else is refused.
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($hash -ne '6AC824E1642D6F7277D0ED7EA09411A508F6116BA6FAE0AA5F2C7DAA2FF43D31') { throw "unexpected WiX archive ($hash)" }
           Expand-Archive $zip "$env:LOCALAPPDATA\Programs\wix3"
           powershell -ExecutionPolicy Bypass -File packaging/windows/build-msi.ps1 -NoBuild
 
       # Release Firefox installs only packages signed by Mozilla. With the repository secrets
       # AMO_JWT_ISSUER / AMO_JWT_SECRET (free addons.mozilla.org account, "unlisted": nothing is
-      # published), tagged builds get a signed .xpi, which RDM installs for good in one click.
+      # published), tagged builds get a signed .xpi, which RDM installs for good in one click — and
+      # the extension's ID is then Mozilla-registered to this project (no one else can sign an
+      # extension under it, which RDM's native connector trusts).
       - name: Stage
         shell: bash
         env:
@@ -82,7 +94,7 @@ jobs:
             cp target/debian/*.deb target/generate-rpm/*.rpm dist/
             cp target/rdm-chromium.zip dist/
             if [ -n "$AMO_JWT_ISSUER" ] && [ -n "$AMO_JWT_SECRET" ] && [ "${GITHUB_REF#refs/tags/v}" != "$GITHUB_REF" ]; then
-              npx --yes web-ext@8 sign --channel=unlisted --source-dir target/firefox --artifacts-dir target/signed \
+              npx --yes web-ext@8.57.0 sign --channel=unlisted --source-dir target/firefox --artifacts-dir target/signed \
                 --api-key "$AMO_JWT_ISSUER" --api-secret "$AMO_JWT_SECRET"
               cp target/signed/*.xpi dist/rdm-firefox.xpi
             else
@@ -90,48 +102,57 @@ jobs:
             fi
           fi
 
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist
+
+  # Tags only: signs the update packages and publishes the release. Apart from the pinned checkout
+  # and artifact download, it runs openssl and gh (both part of the runner): no tool fetched from a
+  # registry and no build script ever runs next to the signing key, so none of them can alter a
+  # package between its signature and its publication.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Every package is there
+        run: |
+          for pattern in 'dist/*.msi' 'dist/*.deb' 'dist/*.rpm' dist/rdm-linux-x64.tar.gz dist/rdm-chromium.zip dist/rdm-firefox.xpi; do
+            compgen -G "$pattern" >/dev/null || { echo "::error::missing $pattern"; exit 1; }
+          done
+
       # RDM installs an update only if its package carries a valid Ed25519 signature made with this
       # key (repository secret RDM_SIGNING_KEY, a PEM private key; its public half is compiled into
       # RDM, see crates/app/src/update.rs). What is signed binds the package to its version, so an
       # old package cannot be replayed as a new one. Tagged builds refuse to ship without it.
       - name: Sign the update packages
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
         env:
           RDM_SIGNING_KEY: ${{ secrets.RDM_SIGNING_KEY }}
+        run: sh .github/sign-packages.sh "${GITHUB_REF#refs/tags/v}" dist
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          [ -n "$RDM_SIGNING_KEY" ] || { echo "::error::secret RDM_SIGNING_KEY is missing: RDM would refuse this release's updates"; exit 1; }
-          key="$RUNNER_TEMP/rdm-signing.pem"
-          trap 'rm -f "$key"' EXIT
-          (umask 077 && printf '%s\n' "$RDM_SIGNING_KEY" >"$key")
-          # The key must be the one RDM trusts.
-          public=$(openssl pkey -in "$key" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
-          grep -q "$public" crates/app/src/update.rs || { echo "::error::RDM_SIGNING_KEY does not match update.rs's PUBLIC_KEY"; exit 1; }
-          openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/rdm-signing.pub"
-          version=${GITHUB_REF#refs/tags/v}
-          statement="$RUNNER_TEMP/statement"
-          for f in dist/*.msi dist/*.deb dist/*.rpm dist/*.tar.gz; do
-            [ -e "$f" ] || continue
-            # Exactly update.rs's signed_statement().
-            printf 'rdm-update\nversion=%s\nname=%s\nsha256=%s\n' "$version" "$(basename "$f")" "$(sha256sum "$f" | cut -d' ' -f1)" >"$statement"
-            openssl pkeyutl -sign -inkey "$key" -rawin -in "$statement" -out "$f.sig"
-            openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/rdm-signing.pub" -rawin -in "$statement" -sigfile "$f.sig"
-          done
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: dist
-
-      - name: Attach to the GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/*.msi
-            dist/*.deb
-            dist/*.rpm
-            dist/*.tar.gz
-            dist/*.xpi
-            dist/*.zip
-            dist/*.sig
+          tag=$GITHUB_REF_NAME
+          notes=docs/releases/$tag.md
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            if [ -f "$notes" ]; then
+              gh release create "$tag" --verify-tag --title "RDM ${tag#v}" --notes-file "$notes"
+            else
+              gh release create "$tag" --verify-tag --title "RDM ${tag#v}" --generate-notes
+            fi
+          fi
+          gh release upload "$tag" --clobber dist/*.msi dist/*.deb dist/*.rpm dist/*.tar.gz dist/*.xpi dist/*.zip dist/*.sig

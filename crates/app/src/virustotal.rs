@@ -187,7 +187,8 @@ async fn upload(client: &Client, key: &str, path: &Path, size: u64, stage: &OnSt
         format!("{API}/files")
     } else {
         let json = get(client, key, &format!("{API}/files/upload_url")).await?;
-        json["data"].as_str().ok_or(Error::Unexpected)?.to_owned()
+        // The API key goes with the file: only to VirusTotal itself, over HTTPS.
+        json["data"].as_str().filter(|u| is_virustotal(u)).ok_or(Error::Unexpected)?.to_owned()
     };
     let url = url.as_str();
     // Rebuilt on each attempt: a streamed body cannot be sent twice.
@@ -197,6 +198,12 @@ async fn upload(client: &Client, key: &str, path: &Path, size: u64, stage: &OnSt
     })
     .await?;
     json["data"]["id"].as_str().map(str::to_owned).ok_or(Error::Unexpected)
+}
+
+fn is_virustotal(url: &str) -> bool {
+    url.parse::<url::Url>().is_ok_and(|u| {
+        u.scheme() == "https" && u.host_str().is_some_and(|h| h == "virustotal.com" || h.ends_with(".virustotal.com"))
+    })
 }
 
 /// The file as a streamed form part. Its name is not sent (VirusTotal shows submitted names to
@@ -296,6 +303,14 @@ mod tests {
         let r = report(&a["stats"], &a["results"], SHA).unwrap();
         assert_eq!((r.engines(), r.flagged()), (70, 0));
         assert!(r.detections.is_empty());
+    }
+
+    #[test]
+    fn the_key_only_goes_to_virustotal() {
+        assert!(is_virustotal("https://www.virustotal.com/_ah/upload/AMmfu6b/"));
+        for elsewhere in ["http://www.virustotal.com/_ah/upload/x", "https://virustotal.com.evil.io/x", "https://evil.io/www.virustotal.com", "nonsense"] {
+            assert!(!is_virustotal(elsewhere), "{elsewhere}");
+        }
     }
 
     #[test]

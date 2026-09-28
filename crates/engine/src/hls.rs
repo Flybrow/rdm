@@ -83,7 +83,8 @@ struct Resume {
 struct Http<'a> {
     client: &'a Client,
     headers: &'a HeaderMap,
-    /// Where the playlist came from: every other URL must not escape it into the LAN.
+    /// Where the playlist came from: every other URL must not escape it into the LAN, and gets
+    /// its credentials only on the same site.
     origin: &'a Url,
     keys: Mutex<HashMap<Url, Arc<[u8]>>>,
     limit: &'a RateLimit,
@@ -336,7 +337,9 @@ fn parse_media(base: &Url, text: &str) -> Result<Vec<Part>, EngineError> {
             let range = match attr(a, "BYTERANGE") {
                 Some(r) => {
                     let (len, offset) = parse_byterange(r).ok_or(EngineError::Playlist("bad byte range"))?;
-                    Some((offset.unwrap_or(0), len))
+                    let offset = offset.unwrap_or(0);
+                    offset.checked_add(len).ok_or(EngineError::Playlist("bad byte range"))?;
+                    Some((offset, len))
                 }
                 None => None,
             };
@@ -418,9 +421,12 @@ async fn get(http: &Http<'_>, url: &Url, range: Option<(u64, u64)>, max: u64) ->
 }
 
 async fn get_once(http: &Http<'_>, url: &Url, range: Option<(u64, u64)>, max: u64) -> Result<Vec<u8>, EngineError> {
-    let mut req = http.client.get(url.clone()).headers(http.headers.clone());
+    // The page's cookies and the site's login stay on the playlist's site.
+    let headers = net::headers_for(http.headers, http.origin, url).into_owned();
+    let mut req = http.client.get(url.clone()).headers(headers);
     if let Some((offset, len)) = range {
-        req = req.header(reqwest::header::RANGE, format!("bytes={offset}-{}", offset + len - 1));
+        let last = offset.checked_add(len - 1).ok_or(EngineError::Playlist("bad byte range"))?;
+        req = req.header(reqwest::header::RANGE, format!("bytes={offset}-{last}"));
     }
     let res = req.send().await?.error_for_status()?;
 
@@ -553,6 +559,8 @@ mod tests {
         assert!(parse(&base(), orphan).is_err());
         assert!(parse_byterange("0@5").is_none());
         assert!(parse_byterange("18446744073709551615@1").is_none());
+        let overflow = "#EXTM3U\n#EXT-X-MAP:URI=\"main.mp4\",BYTERANGE=\"616@18446744073709551615\"\n#EXTINF:6,\nmain.mp4\n";
+        assert!(parse(&base(), overflow).is_err(), "an init segment past the end of any file");
     }
 
     #[test]

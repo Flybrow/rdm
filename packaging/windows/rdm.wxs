@@ -88,11 +88,17 @@
     <SetProperty Id="WixQuietExec64CmdLine" Value="&quot;[System64Folder]taskkill.exe&quot; /F /IM rdm.exe" Before="EndRdm" Sequence="execute" />
     <CustomAction Id="EndRdm" BinaryKey="WixCA" DllEntry="WixQuietExec64" Execute="immediate" Return="ignore" />
 
+    <!-- "Start with the system" is RDM's own setting (HKCU\…\Run\RDM, written by RDM): an
+         uninstallation removes it — not an upgrade, which keeps the user's choice. -->
+    <SetProperty Id="RemoveAutostart" Value="&quot;[System64Folder]reg.exe&quot; delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v RDM /f" Before="RemoveAutostart" Sequence="execute" />
+    <CustomAction Id="RemoveAutostart" BinaryKey="WixCA" DllEntry="WixQuietExec64" Execute="deferred" Return="ignore" Impersonate="yes" />
+
     <!-- Start RDM when the installation ends (also after an in-app update). -->
     <CustomAction Id="Launch" Directory="INSTALLDIR" ExeCommand="[INSTALLDIR]rdm.exe" Return="asyncNoWait" Impersonate="yes" />
     <InstallExecuteSequence>
       <Custom Action="QuitRdm" Before="EndRdm">RDM_QUITS AND (Installed OR WIX_UPGRADE_DETECTED)</Custom>
       <Custom Action="EndRdm" Before="InstallValidate">Installed OR WIX_UPGRADE_DETECTED</Custom>
+      <Custom Action="RemoveAutostart" Before="RemoveRegistryValues">REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
       <Custom Action="Launch" After="InstallFinalize">NOT Installed OR WIX_UPGRADE_DETECTED</Custom>
     </InstallExecuteSequence>
   </Product>

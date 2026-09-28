@@ -4,6 +4,7 @@ mod autostart;
 mod bridge;
 mod extension;
 mod i18n;
+mod local;
 mod manager;
 mod native;
 mod notify;
@@ -69,6 +70,8 @@ fn main() -> eframe::Result {
     let Some(listener) = rt.block_on(single_instance(url_arg.as_ref())) else {
         return Ok(());
     };
+    // The port is ours: the local programs get the token that lets them use it.
+    local::issue_token();
 
     notify::register();
     // Copies of the extension installed by an older RDM get this version's files.
@@ -120,9 +123,9 @@ async fn single_instance(url: Option<&Url>) -> Option<tokio::net::TcpListener> {
     let port = settings::BRIDGE_PORT;
     notify::fatal(&trf!(
         "RDM ne peut pas démarrer : le port local 127.0.0.1:{port} est occupé par un programme qui ne répond pas \
-         (un RDM bloqué ?). Fermez-le (Gestionnaire des tâches), puis relancez RDM.",
+         (un RDM bloqué, ou celui d'une autre session ?). Fermez-le (Gestionnaire des tâches), puis relancez RDM.",
         "RDM cannot start: the local port 127.0.0.1:{port} is taken by a program that does not answer \
-         (a stuck RDM?). Close it (Task Manager), then start RDM again."
+         (a stuck RDM, or another session's?). Close it (Task Manager), then start RDM again."
     ));
     None
 }

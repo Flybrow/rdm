@@ -234,7 +234,7 @@ pub fn save_json(name: &str, value: &impl Serialize) {
     let path = config_file(name);
     let _guard = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(dir) = path.parent() {
-        let _ = fs::create_dir_all(dir);
+        let _ = create_private_dir(dir);
     }
     let tmp = path.with_extension("json.tmp");
     // Synced before the rename: a power cut right after must not leave an empty list behind.
@@ -245,6 +245,42 @@ pub fn save_json(name: &str, value: &impl Serialize) {
     if written.is_ok() {
         let _ = fs::rename(tmp, path);
     }
+}
+
+/// RDM's settings folder, private to the user on Linux (0700, like `~/.ssh`): the download list
+/// holds links with their access tokens, the settings the VirusTotal key. Windows: the profile
+/// folder is private already.
+pub fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        // Made private too when an older RDM created it readable by everyone.
+        if fs::metadata(dir).is_ok_and(|m| m.permissions().mode() & 0o077 != 0) {
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(dir)
+}
+
+/// Writes a file only the user can read: created 0600 on Linux — never readable by others, not
+/// even for an instant; Windows: the profile folder is private to the account already.
+pub fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    let mut f = {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let f = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+        // A leftover file of that name keeps its mode when reopened: made private in any case.
+        f.set_permissions(fs::Permissions::from_mode(0o600))?;
+        f
+    };
+    #[cfg(not(unix))]
+    let mut f = fs::File::create(path)?;
+    f.write_all(data)?;
+    f.sync_all()
 }
 
 /// `path` + `suffix`, without treating anything as an extension (`a.mp4` → `a.mp4.rdm`).
@@ -269,6 +305,20 @@ mod tests {
         s.categorize = false;
         assert_eq!(s.target_dir("a.zip"), PathBuf::from("dl"));
         assert_eq!(s.target_dir("a.mkv"), PathBuf::from("films"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_settings_folder_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("rdm-private-{}", std::process::id()));
+        let nested = dir.join("rdm");
+        create_private_dir(&nested).unwrap();
+        assert_eq!(fs::metadata(&nested).unwrap().permissions().mode() & 0o777, 0o700);
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o755)).unwrap();
+        create_private_dir(&nested).unwrap();
+        assert_eq!(fs::metadata(&nested).unwrap().permissions().mode() & 0o777, 0o700, "an older, readable one is fixed");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

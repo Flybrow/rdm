@@ -9,6 +9,7 @@ use std::{
 use domain::{Segment, plan_segments};
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, header::{HeaderMap, RANGE}};
+use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{self, File, OpenOptions},
     io::{AsyncSeekExt, AsyncWriteExt},
@@ -85,7 +86,7 @@ pub(crate) async fn run(
         return Err(EngineError::Empty);
     }
     let segments = match info.size {
-        Some(size) if info.ranges => match load_state(&state, &job.target, size).await {
+        Some(size) if info.ranges => match load_state(&state, &job.target, size, info.version.as_deref()).await {
             Some(saved) => saved,
             None => {
                 preallocate(&job.target, size).await?;
@@ -143,7 +144,7 @@ pub(crate) async fn run(
             }
             // A crash, a kill or a session closing mid-download loses at most this much.
             _ = checkpoint.tick(), if info.ranges => {
-                let _ = persist(&job.target, &state, &ctx.slots.segments()).await;
+                let _ = persist(&job.target, &state, info.version.as_deref(), &ctx.slots.segments()).await;
             }
             // More connections while they help: waiting pieces first, then halves of the largest.
             _ = ramp.tick(), if info.ranges && failure.is_none() && !ctx.stop.is_cancelled() => {
@@ -167,7 +168,7 @@ pub(crate) async fn run(
     }
     // The data must be on disk before a state file claims it is: a power cut must not leave a
     // resume point ahead of the bytes actually stored.
-    let saved = if info.ranges { persist(&job.target, &state, &ctx.slots.segments()).await } else { Ok(()) };
+    let saved = if info.ranges { persist(&job.target, &state, info.version.as_deref(), &ctx.slots.segments()).await } else { Ok(()) };
     match failure {
         Some(e) => Err(e), // the real cause wins over a secondary save error
         None => {
@@ -183,9 +184,9 @@ fn spawn(workers: &mut JoinSet<Result<(), EngineError>>, ctx: &Arc<Ctx>, slot: A
     workers.spawn(worker(ctx.clone(), slot, active));
 }
 
-async fn persist(target: &Path, state: &Path, segs: &[Segment]) -> std::io::Result<()> {
+async fn persist(target: &Path, state: &Path, version: Option<&str>, segs: &[Segment]) -> std::io::Result<()> {
     OpenOptions::new().write(true).open(target).await?.sync_data().await?;
-    save_state(state, segs).await
+    save_state(state, version, segs).await
 }
 
 async fn worker(ctx: Arc<Ctx>, mut slot: Arc<Slot>, mut active: Active) -> Result<(), EngineError> {
@@ -282,8 +283,17 @@ async fn fetch(ctx: &Ctx, slot: &Slot) -> Result<(), EngineError> {
         () = ctx.stop.cancelled() => return Ok(()),
         res = req.send() => res?.error_for_status()?,
     };
-    // A 206 for another range (broken proxy/CDN) would silently corrupt the file.
-    if ctx.ranges && (res.status() != StatusCode::PARTIAL_CONTENT || range_start(res.headers()) != Some(pos)) {
+    // A 206 for another range (broken proxy/CDN) would silently corrupt the file. A 200 is the whole
+    // file: right only when the whole file was asked for (RFC 9110 lets a server answer that way).
+    let whole_file = pos == 0 && ctx.size.is_some_and(|size| end.checked_add(1) == Some(size));
+    let fits = match res.status() {
+        StatusCode::PARTIAL_CONTENT => range_start(res.headers()) == Some(pos),
+        // Its length too: a server answering with another version of the file (another size) would
+        // not fit.
+        StatusCode::OK => whole_file && res.content_length() == ctx.size,
+        _ => false,
+    };
+    if ctx.ranges && !fits {
         return Err(EngineError::RangeIgnored);
     }
 
@@ -417,10 +427,32 @@ fn range_start(headers: &HeaderMap) -> Option<u64> {
     v.strip_prefix("bytes ")?.split(['-', '/']).next()?.trim().parse().ok()
 }
 
-async fn load_state(state: &Path, target: &Path, size: u64) -> Option<Vec<Segment>> {
+/// What a resume state file holds: the file's version on the server when the download began, and
+/// how far each piece went.
+#[derive(Serialize, Deserialize)]
+struct Saved {
+    #[serde(default)]
+    version: Option<String>,
+    segments: Vec<Segment>,
+}
+
+/// The pieces to resume, or `None` to start over: no usable state, or the file changed on the
+/// server since (another size, another version) — its new bytes would not continue the old ones.
+async fn load_state(state: &Path, target: &Path, size: u64, version: Option<&str>) -> Option<Vec<Segment>> {
     fs::metadata(target).await.ok().filter(|m| m.len() == size)?;
-    let segs: Vec<Segment> = serde_json::from_slice(&fs::read(state).await.ok()?).ok()?;
-    covers_exactly(segs, size)
+    let saved = parse_state(&fs::read(state).await.ok()?)?;
+    let changed = matches!((saved.version.as_deref(), version), (Some(then), Some(now)) if then != now);
+    if changed {
+        return None;
+    }
+    covers_exactly(saved.segments, size)
+}
+
+/// A state file, of this version of RDM or an older one (the bare list of pieces).
+fn parse_state(bytes: &[u8]) -> Option<Saved> {
+    serde_json::from_slice::<Saved>(bytes)
+        .or_else(|_| serde_json::from_slice::<Vec<Segment>>(bytes).map(|segments| Saved { version: None, segments }))
+        .ok()
 }
 
 /// Rejects a tampered or stale state file: segments must tile `[0, size)` with no gap or overlap.
@@ -437,10 +469,11 @@ fn covers_exactly(mut segs: Vec<Segment>, size: u64) -> Option<Vec<Segment>> {
 }
 
 /// Atomic (temp + rename, data synced first): a crash mid-write never leaves a torn state file.
-async fn save_state(state: &Path, segs: &[Segment]) -> std::io::Result<()> {
+async fn save_state(state: &Path, version: Option<&str>, segs: &[Segment]) -> std::io::Result<()> {
     let tmp = state.with_extension("rdm.tmp");
     let mut file = File::create(&tmp).await?;
-    file.write_all(&serde_json::to_vec(segs)?).await?;
+    let saved = Saved { version: version.map(str::to_owned), segments: segs.to_vec() };
+    file.write_all(&serde_json::to_vec(&saved)?).await?;
     file.sync_all().await?;
     drop(file);
     fs::rename(tmp, state).await
@@ -484,6 +517,26 @@ mod tests {
         assert!(covers_exactly(vec![Segment::new(0, 49), Segment::new(60, 99)], 100).is_none());
         assert!(covers_exactly(vec![Segment::new(0, 49)], 100).is_none());
         assert!(covers_exactly(vec![Segment::new(0, u64::MAX)], 100).is_none());
+    }
+
+    #[tokio::test]
+    async fn resumes_only_the_same_version_of_the_file() {
+        let dir = std::env::temp_dir().join(format!("rdm-resume-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (target, state) = (dir.join("f.bin"), dir.join("f.bin.rdm"));
+        std::fs::write(&target, vec![0u8; 100]).unwrap();
+        let segs = [Segment::new(0, 49), Segment::new(50, 99)];
+        let v1 = Some("date:Wed, 21 Oct 2025 07:28:00 GMT");
+
+        save_state(&state, v1, &segs).await.unwrap();
+        assert!(load_state(&state, &target, 100, v1).await.is_some(), "same version: resumed");
+        assert!(load_state(&state, &target, 100, None).await.is_some(), "the server no longer says: resumed");
+        assert!(load_state(&state, &target, 100, Some("date:Thu, 22 Oct 2025 07:28:00 GMT")).await.is_none(), "changed: start over");
+        assert!(load_state(&state, &target, 200, v1).await.is_none(), "another size: start over");
+        // A state written by an older RDM (the bare list of pieces).
+        std::fs::write(&state, serde_json::to_vec(&segs).unwrap()).unwrap();
+        assert!(load_state(&state, &target, 100, v1).await.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

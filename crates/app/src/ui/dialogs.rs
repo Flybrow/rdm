@@ -199,6 +199,57 @@ impl App<'_> {
         }
     }
 
+    /// "Delete the file": the file goes for good (not to the recycle bin), so the user confirms.
+    pub(super) fn delete_dialog(&mut self, ctx: &Context) {
+        let Some(id) = self.confirm_delete else { return };
+        let Some((name, path)) = self.manager.view(|es| es.iter().find(|e| e.download.id == id).map(|e| (e.name.clone(), e.download.target.clone()))) else {
+            self.confirm_delete = None; // removed meanwhile
+            return;
+        };
+        let p = Palette::from_ctx(ctx);
+        let mut answer = None;
+        let modal = Modal::new(Id::new("delete")).frame(dialog_frame(&p)).backdrop_color(backdrop(&p)).show(ctx, |ui| {
+            ui.set_width(500.0);
+            if dialog_header(ui, &p, icon::TRASH, p.danger, tr!("Supprimer le fichier ?", "Delete the file?"), &name) {
+                answer = Some(false);
+            }
+            ui.add_space(14.0);
+            Frame::new().fill(p.raised).corner_radius(12).inner_margin(Margin::same(12)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(Label::new(RichText::new(path.display().to_string()).monospace().color(p.text)).wrap());
+            });
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new(tr!(
+                    "Le fichier est effacé du disque définitivement (il ne va pas dans la corbeille), et le téléchargement quitte la liste.",
+                    "The file is erased from the disk for good (it does not go to the recycle bin), and the download leaves the list."
+                ))
+                .color(p.muted),
+            );
+            ui.add_space(16.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if accent_button(ui, icon::TRASH, tr!("Supprimer", "Delete")).clicked() {
+                    answer = Some(true);
+                }
+                if ghost_button(ui, icon::X, tr!("Annuler", "Cancel")).clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        if modal.should_close() {
+            answer = answer.or(Some(false));
+        }
+        match answer {
+            Some(true) => {
+                self.manager.remove(id, true);
+                self.toasts.info(icon::TRASH, tr!("Fichier supprimé", "File deleted"));
+                self.confirm_delete = None;
+            }
+            Some(false) => self.confirm_delete = None,
+            None => {}
+        }
+    }
+
     /// A Firefox extension asked to use the bridge: the user approves its (per-install) origin once.
     pub(super) fn firefox_prompt(&self, ctx: &Context) {
         let Some(origin) = self.manager.firefox_pending() else { return };

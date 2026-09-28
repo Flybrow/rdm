@@ -10,6 +10,28 @@ pub struct Probe {
     pub file_name: String,
     /// HLS playlist: downloaded segment by segment (see [`crate::hls_info`] for the container).
     pub hls: bool,
+    /// What identifies this version of the file on the server (`Last-Modified`, else a strong
+    /// `ETag`): a download resumed later must continue the same file, not a newer one.
+    pub version: Option<String>,
+}
+
+/// The file's version as the server states it. `Last-Modified` first: it stays the same across
+/// the servers of a CDN or a mirror pool, where an `ETag` often differs from one to the next
+/// (Apache puts the inode in it). A weak `ETag` (`W/…`) says nothing about the bytes, and neither
+/// does a date that is the moment of the answer: download scripts stamp every response "now",
+/// which would make every resume start over.
+fn version_of(headers: &HeaderMap) -> Option<String> {
+    let text = |name| headers.get(name).and_then(|v| v.to_str().ok()).map(str::trim).filter(|v| !v.is_empty());
+    let answered = text(header::DATE).and_then(|d| httpdate::parse_http_date(d).ok());
+    let stamped_now = |modified: &str| match (httpdate::parse_http_date(modified), answered) {
+        // Within a minute of the answer (or after it): not a file's date.
+        (Ok(modified), Some(answered)) => answered.duration_since(modified).unwrap_or_default() < std::time::Duration::from_secs(60),
+        _ => false,
+    };
+    text(header::LAST_MODIFIED)
+        .filter(|date| !stamped_now(date))
+        .map(|date| format!("date:{date}"))
+        .or_else(|| text(header::ETAG).filter(|tag| !tag.starts_with("W/")).map(|tag| format!("etag:{tag}")))
 }
 
 /// Attempts for the initial request: transient failures (timeout, reset, 5xx, 429) are retried.
@@ -51,6 +73,7 @@ async fn try_probe(client: &Client, url: &Url, headers: &HeaderMap) -> Result<Pr
     } else {
         res.content_length()
     };
+    let version = version_of(h);
     let disposition = h.get(header::CONTENT_DISPOSITION).and_then(|v| v.to_str().ok());
     let content_type = h.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
     let hls = crate::hls::is_playlist(res.url(), content_type);
@@ -65,7 +88,7 @@ async fn try_probe(client: &Client, url: &Url, headers: &HeaderMap) -> Result<Pr
         let _ = res.bytes().await;
     }
 
-    Ok(Probe { size, ranges: ranges && size.is_some() && !hls, file_name, hls })
+    Ok(Probe { size, ranges: ranges && size.is_some() && !hls, file_name, hls, version })
 }
 
 pub fn suggest_file_name(url: &Url, disposition: Option<&str>) -> String {
@@ -140,11 +163,15 @@ fn percent_decode(s: &str) -> String {
 const MAX_NAME_CHARS: usize = 180;
 
 /// Untrusted name (server, web page) → a single safe path component on Windows and Linux:
-/// no separators or traversal, no reserved device names, bounded length, extension kept.
+/// no separators or traversal, no reserved device names, no text-direction tricks, bounded
+/// length, extension kept.
 pub fn sanitize_file_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || c.is_control() { '_' } else { c })
+        .map(|c| {
+            let unsafe_char = matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || c.is_control() || is_bidi_control(c);
+            if unsafe_char { '_' } else { c }
+        })
         .collect();
     let cleaned = cleaned.trim_matches([' ', '.']);
 
@@ -155,11 +182,15 @@ pub fn sanitize_file_name(name: &str) -> String {
     let budget = MAX_NAME_CHARS.saturating_sub(ext.map_or(0, |e| e.chars().count() + 1));
     let mut stem: String = stem.chars().take(budget).collect::<String>().trim_end().to_owned();
 
-    let device = stem.split('.').next().unwrap_or_default().to_ascii_uppercase();
-    let reserved = matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (device.len() == 4
-            && (device.starts_with("COM") || device.starts_with("LPT"))
-            && device.as_bytes()[3].is_ascii_digit());
+    // Windows ignores trailing spaces here: "NUL .txt" is the NUL device too.
+    let device = stem.split('.').next().unwrap_or_default().trim_end().to_uppercase();
+    let numbered = |prefix: &str| {
+        device.strip_prefix(prefix).is_some_and(|n| {
+            let mut digits = n.chars();
+            matches!((digits.next(), digits.next()), (Some('0'..='9' | '¹' | '²' | '³'), None))
+        })
+    };
+    let reserved = matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") || numbered("COM") || numbered("LPT");
     if reserved {
         stem.insert(0, '_');
     }
@@ -168,6 +199,11 @@ pub fn sanitize_file_name(name: &str) -> String {
         (false, Some(ext)) => format!("{stem}.{ext}"),
         (false, None) => stem,
     }
+}
+
+/// Characters that reorder the text around them: "invoice\u{202E}fdp.exe" reads "invoiceexe.pdf".
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 #[cfg(test)]
@@ -180,6 +216,22 @@ mod tests {
         assert_eq!(suggest_file_name(&u, None), "My File.zip");
         assert_eq!(suggest_file_name(&u, Some("attachment; filename=\"a:b.iso\"")), "a_b.iso");
         assert_eq!(suggest_file_name(&u, Some("attachment; filename*=UTF-8''%C3%A9t%C3%A9.mp4")), "été.mp4");
+    }
+
+    #[test]
+    fn a_files_version() {
+        let headers = |pairs: &[(header::HeaderName, &str)]| pairs.iter().map(|(k, v)| (k.clone(), v.parse().unwrap())).collect::<HeaderMap>();
+        let date = "Tue, 21 Oct 2025 07:28:00 GMT";
+        assert_eq!(version_of(&headers(&[(header::ETAG, "\"abc\""), (header::LAST_MODIFIED, date)])), Some(format!("date:{date}")));
+        assert_eq!(version_of(&headers(&[(header::ETAG, "\"abc\"")])).as_deref(), Some("etag:\"abc\""));
+        assert_eq!(version_of(&headers(&[(header::ETAG, "W/\"abc\"")])), None, "a weak tag says nothing");
+        assert_eq!(version_of(&HeaderMap::new()), None);
+        // A script stamping each answer "now": the date is not the file's.
+        let now = "Mon, 28 Sep 2026 12:00:00 GMT";
+        assert_eq!(version_of(&headers(&[(header::DATE, now), (header::LAST_MODIFIED, now)])), None);
+        assert_eq!(version_of(&headers(&[(header::DATE, now), (header::LAST_MODIFIED, now), (header::ETAG, "\"v2\"")])).as_deref(), Some("etag:\"v2\""));
+        let older = format!("date:{date}");
+        assert_eq!(version_of(&headers(&[(header::DATE, now), (header::LAST_MODIFIED, date)])), Some(older), "a real, older date");
     }
 
     #[test]
@@ -202,6 +254,14 @@ mod tests {
         assert_eq!(sanitize_file_name("..\\..\\Windows\\x.exe"), "_.._Windows_x.exe");
         assert_eq!(sanitize_file_name("CON.txt"), "_CON.txt");
         assert_eq!(sanitize_file_name("com1"), "_com1");
+        assert_eq!(sanitize_file_name("NUL .txt"), "_NUL.txt");
+        assert_eq!(sanitize_file_name("nul .tar.gz"), "_nul .tar.gz");
+        assert_eq!(sanitize_file_name("COM¹.log"), "_COM¹.log");
+        assert_eq!(sanitize_file_name("conout$"), "_conout$");
+        assert_eq!(sanitize_file_name("COM10.txt"), "COM10.txt");
+        assert_eq!(sanitize_file_name("Console.txt"), "Console.txt");
+        assert_eq!(sanitize_file_name("invoice\u{202E}fdp.exe"), "invoice_fdp.exe", "right-to-left override");
+        assert_eq!(sanitize_file_name("a\u{2067}b\u{200F}.zip"), "a_b_.zip");
         assert_eq!(sanitize_file_name(" ... "), "download");
         let long = format!("{}.mp4", "a".repeat(500));
         let safe = sanitize_file_name(&long);

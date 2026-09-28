@@ -37,10 +37,10 @@ impl Secrets {
         let Some(sealed) = imp::seal(&plain) else { return };
         let path = crate::settings::config_file(FILE);
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            let _ = crate::settings::create_private_dir(dir);
         }
         let tmp = crate::settings::with_suffix(&path, ".tmp");
-        if imp::write_private(&tmp, &sealed).is_ok() {
+        if crate::settings::write_private(&tmp, &sealed).is_ok() {
             let _ = std::fs::rename(tmp, path);
         }
     }
@@ -117,14 +117,6 @@ mod imp {
         // SAFETY: `out` was filled by a successful call.
         (ok != 0).then(|| unsafe { take(&out) })
     }
-
-    pub fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-        // The profile folder is private to the account already; the content is encrypted anyway.
-        use std::io::Write;
-        let mut f = std::fs::File::create(path)?;
-        f.write_all(data)?;
-        f.sync_all()
-    }
 }
 
 #[cfg(not(windows))]
@@ -135,19 +127,6 @@ mod imp {
 
     pub fn open(sealed: &[u8]) -> Option<Vec<u8>> {
         Some(sealed.to_vec())
-    }
-
-    /// Created readable by the user only (0600) — never world-readable, not even for an instant.
-    pub fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-        use std::{
-            io::Write,
-            os::unix::fs::{OpenOptionsExt, PermissionsExt},
-        };
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
-        // A leftover file of that name keeps its mode when reopened: made private in any case.
-        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        f.write_all(data)?;
-        f.sync_all()
     }
 }
 

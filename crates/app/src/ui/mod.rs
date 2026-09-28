@@ -448,6 +448,8 @@ struct App<'a> {
     report: Option<DownloadId>,
     /// The small editor open on one download, if any.
     edit: Option<edit::Editor>,
+    /// "Delete the file" asked: waiting for the user's confirmation.
+    confirm_delete: Option<DownloadId>,
     toasts: Toasts,
     /// Something on screen moves this frame (progress, spinner): keep redrawing.
     animating: bool,
@@ -484,6 +486,7 @@ impl<'a> App<'a> {
             report: None,
             browsers: None,
             edit: None,
+            confirm_delete: None,
             toasts: Toasts::default(),
             animating: false,
             settle_frames: 0,
@@ -563,12 +566,9 @@ impl<'a> App<'a> {
             match action {
                 Action::Resume(id) => self.manager.resume(id),
                 Action::Pause(id) => self.manager.pause(id),
-                Action::Remove(id, delete) => {
-                    self.manager.remove(id, delete);
-                    if delete {
-                        self.toasts.info(icon::TRASH, tr!("Fichier supprimé", "File deleted"));
-                    }
-                }
+                // Deleting a file cannot be undone: asked first (see `delete_dialog`).
+                Action::Remove(id, true) => self.confirm_delete = Some(id),
+                Action::Remove(id, false) => self.manager.remove(id, false),
                 Action::Open(path) => open_file(path),
                 Action::Reveal(path) => reveal_file(path),
                 Action::Copy(text, what) => {
@@ -647,7 +647,7 @@ impl eframe::App for App<'_> {
         // A dialog or menu closing: two more frames at once, without it. egui matches clicks
         // against the previous frame, and keeps a dialog's modal layer one frame longer: otherwise
         // the next click would still hit the closed dialog and be lost.
-        let overlays = (self.settings.is_some(), self.report.is_some(), self.browsers.is_some(), self.edit.is_some());
+        let overlays = (self.settings.is_some(), self.report.is_some(), self.browsers.is_some(), self.edit.is_some(), self.confirm_delete.is_some());
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.settle_frames = 2;
         }
@@ -674,9 +674,10 @@ impl eframe::App for App<'_> {
         self.report_dialog(ctx, &mut actions);
         self.browsers_dialog(ctx);
         self.edit_dialog(ctx);
+        self.delete_dialog(ctx);
         self.firefox_prompt(ctx);
         self.apply(ctx, actions);
-        if overlays != (self.settings.is_some(), self.report.is_some(), self.browsers.is_some(), self.edit.is_some()) {
+        if overlays != (self.settings.is_some(), self.report.is_some(), self.browsers.is_some(), self.edit.is_some(), self.confirm_delete.is_some()) {
             self.settle_frames = 2;
         }
         if self.settle_frames > 0 {

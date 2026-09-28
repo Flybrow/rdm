@@ -1,12 +1,14 @@
 //! Loopback HTTP bridge the browser extension talks to.
 //!
-//! Threat model: any web page — and any other browser extension — can send requests to 127.0.0.1.
-//! Defences:
+//! Threat model: any web page, any other browser extension, and any other account of the computer
+//! can send requests to 127.0.0.1. Defences:
 //! - `Origin`: browsers always set it on cross-origin requests; only *our* extension ID passes
-//!   (pinned by the manifest `key`), plus local non-browser tools (no `Origin`, already trusted);
-//!   Firefox extensions have a random per-install origin: paired by the native connector (see
-//!   `native`, a local program: `POST /pair`), or else accepted once the user approved it (Firefox
+//!   (pinned by the manifest `key`); Firefox extensions have a random per-install origin: paired
+//!   by the native connector (`POST /pair`), or else accepted once the user approved it (Firefox
 //!   sends `Origin` on POST only: the extension asks with `POST /ping` when it starts);
+//! - no `Origin` (a local program — the native connector, `rdm --quit`, a second launch): only
+//!   with the token RDM writes in the user's private files (see `local`); without it, only
+//!   `GET /ping` and `GET /config` (the Firefox extension's GETs carry no `Origin`);
 //! - `Host`: must be the loopback address, which defeats DNS rebinding;
 //! - JSON bodies (force a CORS preflight we never answer), 64 KiB cap, http(s) URLs only.
 
@@ -27,6 +29,7 @@ use tokio::net::TcpListener;
 use url::Url;
 
 use crate::{
+    local,
     manager::{self, AddRequest, Manager, Track},
     settings::BRIDGE_PORT,
 };
@@ -45,7 +48,7 @@ pub async fn bind() -> std::io::Result<TcpListener> {
 pub async fn serve(manager: Arc<Manager>, listener: TcpListener) {
     let app = Router::new()
         // POST: Firefox sends `Origin` on POST only, so this is how its extension pairs.
-        .route("/ping", get(ping).post(ping))
+        .route("/ping", get(ping_read).post(ping))
         .route("/config", get(config))
         .route("/add", post(add))
         .route("/probe", post(probe))
@@ -65,10 +68,27 @@ pub async fn serve(manager: Arc<Manager>, listener: TcpListener) {
 }
 
 fn guard(manager: &Manager, headers: &HeaderMap) -> Result<(), StatusCode> {
-    guard_with(headers, |origin| manager.firefox_allowed(origin))?;
+    guard_access(manager, headers, Access::Act)
+}
+
+/// What a request carrying no `Origin` may do without the token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Access {
+    /// Only learn what any program of the computer may know (RDM is here, the formats it takes):
+    /// the Firefox extension's `GET`s carry no `Origin`.
+    Read,
+    /// Anything else: the browsers' own origins, or a local program holding the token.
+    Act,
+}
+
+fn guard_access(manager: &Manager, headers: &HeaderMap, access: Access) -> Result<(), StatusCode> {
+    let token = local::served_token().unwrap_or_default();
+    guard_with(headers, token, access, |origin| manager.firefox_allowed(origin))?;
     // Which browser the extension runs in (the extension window shows the connected ones); sent
-    // by the extension itself or its native connector. A web page cannot set this header.
-    if let Some(browser) = headers.get(BROWSER).and_then(|v| v.to_str().ok()) {
+    // by the extension itself or its native connector. A web page cannot set this header; an
+    // anonymous read (any program of the computer) is not taken at its word either.
+    let proven = headers.contains_key(ORIGIN) || guard_with(headers, token, Access::Act, |_| false).is_ok();
+    if proven && let Some(browser) = headers.get(BROWSER).and_then(|v| v.to_str().ok()) {
         manager.browser_seen(browser);
     }
     Ok(())
@@ -80,7 +100,7 @@ const BROWSER: &str = "x-rdm-browser";
 /// `firefox`: whether a (`moz-extension://…`) origin was approved by the user. Such an origin not
 /// approved (yet) gets 401 — the extension then says "approve me in RDM", not "RDM is not
 /// running" — anything else untrusted gets 403.
-fn guard_with(headers: &HeaderMap, firefox: impl FnOnce(&str) -> bool) -> Result<(), StatusCode> {
+fn guard_with(headers: &HeaderMap, token: &str, access: Access, firefox: impl FnOnce(&str) -> bool) -> Result<(), StatusCode> {
     let host_ok = headers.get(HOST).and_then(|h| h.to_str().ok()).is_some_and(|h| {
         let host = h.rsplit_once(':').map_or(h, |(host, _)| host);
         matches!(host, "127.0.0.1" | "localhost")
@@ -89,7 +109,10 @@ fn guard_with(headers: &HeaderMap, firefox: impl FnOnce(&str) -> bool) -> Result
         return Err(StatusCode::FORBIDDEN);
     }
     match headers.get(ORIGIN).map(|o| o.to_str()) {
-        None => Ok(()),
+        // A local program: only the user's own (it could read the token in the user's files).
+        None if access == Access::Read => Ok(()),
+        None if !token.is_empty() && local::token_matches(token, headers.get(local::TOKEN_HEADER).map(|v| v.as_bytes())) => Ok(()),
+        None => Err(StatusCode::FORBIDDEN),
         Some(Ok(o)) if o == EXTENSION_ORIGIN => Ok(()),
         Some(Ok(o)) if o.starts_with("moz-extension://") => {
             if firefox(o) { Ok(()) } else { Err(StatusCode::UNAUTHORIZED) }
@@ -107,6 +130,12 @@ async fn ping(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> Result
     Ok(concat!("rdm ", env!("CARGO_PKG_VERSION")))
 }
 
+/// `GET /ping`: is RDM here (the Firefox extension's `GET`s carry no `Origin`).
+async fn ping_read(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> Result<&'static str, StatusCode> {
+    guard_access(&manager, &headers, Access::Read)?;
+    Ok(concat!("rdm ", env!("CARGO_PKG_VERSION")))
+}
+
 #[derive(Serialize)]
 struct Config {
     /// Extensions the browser should hand over (space-separated), from the user's settings.
@@ -114,7 +143,7 @@ struct Config {
 }
 
 async fn config(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> Result<Json<Config>, StatusCode> {
-    guard(&manager, &headers)?;
+    guard_access(&manager, &headers, Access::Read)?;
     Ok(Json(Config { captured: manager.settings().captured }))
 }
 
@@ -140,7 +169,7 @@ async fn probe(
         return Err(StatusCode::BAD_REQUEST);
     }
     let request_headers = manager::header_map(&req);
-    let client = manager.client();
+    let client = manager.client(&req.url).await;
     let info = engine::hls_info(&client, &req.url, &request_headers);
     match tokio::time::timeout(PROBE_TIMEOUT, info).await {
         Ok(Ok(info)) => Ok(Json(info)),
@@ -169,7 +198,7 @@ async fn check(
         return Err(StatusCode::BAD_REQUEST);
     }
     let request_headers = manager::header_map(&req);
-    let client = manager.client();
+    let client = manager.client(&req.url).await;
     let verdict = async {
         let p = engine::probe(&client, &req.url, &request_headers).await?;
         // Some servers (YouTube without its anti-bot token) serve the beginning and refuse the rest:
@@ -310,8 +339,11 @@ async fn quit(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> Status
 }
 
 async fn show(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> StatusCode {
-    // The extension's toolbar button: an explicit request, so a put-off approval question returns.
-    manager.firefox_wake();
+    // The Firefox extension's toolbar button (not approved yet: before the guard refuses it): an
+    // explicit request, so a put-off approval question returns. Not for a web page's request.
+    if headers.get(ORIGIN).is_some_and(|o| o.as_bytes().starts_with(b"moz-extension://")) {
+        manager.firefox_wake();
+    }
     if let Err(status) = guard(&manager, &headers) {
         return status;
     }
@@ -321,14 +353,26 @@ async fn show(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> Status
 
 /// For talking to the running RDM: never through a proxy (a system proxy would get 127.0.0.1).
 fn local_client() -> Option<engine::Client> {
-    engine::client_with(&engine::ClientOptions { route: engine::Route::Direct, insecure: false }).ok()
+    engine::client_with(&engine::ClientOptions { route: engine::Route::Direct, ..engine::ClientOptions::default() }).ok()
+}
+
+/// A request to the running RDM, as a local program (see `local`): only when the program on the
+/// bridge's port runs as this user, and with the token that proves this program does too.
+fn local_post(path: &str) -> Option<reqwest::RequestBuilder> {
+    if !local::bridge_is_ours() {
+        return None;
+    }
+    let request = local_client()?.post(format!("http://127.0.0.1:{BRIDGE_PORT}{path}"));
+    Some(match local::read_token() {
+        Some(token) => request.header(local::TOKEN_HEADER, token),
+        None => request, // an older RDM: it asks for none
+    })
 }
 
 /// `rdm --quit`: asks a running RDM to quit and waits (bounded) until it is gone. Starts nothing.
 pub async fn quit_running() {
-    let Some(client) = local_client() else { return };
-    let asked = client
-        .post(format!("http://127.0.0.1:{BRIDGE_PORT}/quit"))
+    let Some(request) = local_post("/quit") else { return };
+    let asked = request
         .timeout(Duration::from_secs(5))
         .send()
         .await
@@ -348,15 +392,11 @@ pub async fn quit_running() {
 /// Second launch: hands the URL (or just "show yourself") to the running instance; `true` when it
 /// took the request.
 pub async fn forward(url: Option<&Url>) -> bool {
-    let Some(client) = local_client() else { return false };
-    let base = format!("http://127.0.0.1:{BRIDGE_PORT}");
     let request = match url {
-        Some(url) => client
-            .post(format!("{base}/add"))
-            .header("content-type", "application/json")
-            .body(serde_json::json!({ "url": url }).to_string()),
-        None => client.post(format!("{base}/show")),
+        Some(url) => local_post("/add").map(|r| r.header("content-type", "application/json").body(serde_json::json!({ "url": url }).to_string())),
+        None => local_post("/show"),
     };
+    let Some(request) = request else { return false };
     request.timeout(Duration::from_secs(5)).send().await.is_ok_and(|r| r.status().is_success())
 }
 
@@ -370,27 +410,46 @@ mod tests {
         pairs.iter().map(|(k, v)| (k.parse().unwrap(), v.parse().unwrap())).collect()
     }
 
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     #[test]
     fn origin_and_host_rules() {
-        let guard = |h: &HeaderMap| guard_with(h, |_| panic!("not a Firefox origin"));
+        let guard = |h: &HeaderMap| guard_with(h, TOKEN, Access::Act, |_| panic!("not a Firefox origin"));
         assert_eq!(guard(&headers(&[("host", "127.0.0.1:9614"), ("origin", EXTENSION_ORIGIN)])), Ok(()));
-        assert_eq!(guard(&headers(&[("host", "localhost:9614")])), Ok(()));
+        assert_eq!(guard(&headers(&[("host", "localhost:9614"), (local::TOKEN_HEADER, TOKEN)])), Ok(()));
         assert_eq!(guard(&headers(&[("host", "127.0.0.1:9614"), ("origin", "https://evil.example")])), FORBIDDEN);
         assert_eq!(guard(&headers(&[("host", "127.0.0.1:9614"), ("origin", "chrome-extension://another")])), FORBIDDEN);
         assert_eq!(guard(&headers(&[("host", "evil.example:9614"), ("origin", EXTENSION_ORIGIN)])), FORBIDDEN);
-        assert_eq!(guard(&headers(&[("host", "127.0.0.1.evil.example")])), FORBIDDEN);
+        assert_eq!(guard(&headers(&[("host", "127.0.0.1.evil.example"), (local::TOKEN_HEADER, TOKEN)])), FORBIDDEN);
         assert_eq!(guard(&headers(&[])), FORBIDDEN);
+    }
+
+    /// A local program without `Origin` must prove it is the user's (the token from the user's
+    /// files): another account of the computer, or a stripped `Origin`, gets nothing done.
+    #[test]
+    fn local_programs_need_the_token() {
+        let h = |pairs: &[(&'static str, &str)]| headers(&[&[("host", "127.0.0.1:9614")], pairs].concat());
+        let act = |h: &HeaderMap| guard_with(h, TOKEN, Access::Act, |_| panic!("no origin"));
+        assert_eq!(act(&h(&[(local::TOKEN_HEADER, TOKEN)])), Ok(()));
+        assert_eq!(act(&h(&[])), FORBIDDEN, "no token");
+        assert_eq!(act(&h(&[(local::TOKEN_HEADER, &TOKEN.replace('0', "1"))])), FORBIDDEN, "a wrong token");
+        assert_eq!(guard_with(&h(&[]), "", Access::Act, |_| false), FORBIDDEN, "no token issued: nobody");
+        // Reading whether RDM is here and what it captures stays open (Firefox's GETs).
+        assert_eq!(guard_with(&h(&[]), TOKEN, Access::Read, |_| false), Ok(()));
+        // An origin is judged as an origin, token or not.
+        let web = h(&[("origin", "https://evil.example"), (local::TOKEN_HEADER, TOKEN)]);
+        assert_eq!(guard_with(&web, TOKEN, Access::Read, |_| false), FORBIDDEN);
     }
 
     #[test]
     fn firefox_origins_need_approval() {
         const FF: &str = "moz-extension://0f8e7a1c-3b2d-4e5f-9a8b-7c6d5e4f3a2b";
         let h = headers(&[("host", "127.0.0.1:9614"), ("origin", FF)]);
-        assert_eq!(guard_with(&h, |o| o == FF), Ok(()));
+        assert_eq!(guard_with(&h, TOKEN, Access::Act, |o| o == FF), Ok(()));
         // Waiting for the user's approval: 401, told apart from a foreign caller.
-        assert_eq!(guard_with(&h, |_| false), Err(StatusCode::UNAUTHORIZED));
+        assert_eq!(guard_with(&h, TOKEN, Access::Act, |_| false), Err(StatusCode::UNAUTHORIZED));
         // A foreign host is refused before anything is put up for approval.
         let h = headers(&[("host", "evil.example"), ("origin", FF)]);
-        assert_eq!(guard_with(&h, |_| panic!("must not ask")), FORBIDDEN);
+        assert_eq!(guard_with(&h, TOKEN, Access::Act, |_| panic!("must not ask")), FORBIDDEN);
     }
 }
