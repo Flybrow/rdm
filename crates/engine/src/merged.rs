@@ -12,7 +12,7 @@ use tokio::fs;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::{EngineError, Job, Outcome, Progress, mux, transfer, with_suffix};
+use crate::{EngineError, Job, Outcome, Progress, mux, net, transfer, with_suffix};
 
 /// Suffixes of every temporary file a split download may leave next to its target.
 pub const PART_SUFFIXES: [&str; 7] = [
@@ -39,6 +39,8 @@ pub(crate) async fn run(
         target: split.audio.clone(),
         audio: None,
         connections: (job.connections / 4).max(1),
+        // The credentials given for the video stay on its site.
+        headers: net::headers_for(&job.headers, &job.url, audio).into_owned(),
         ..job.clone()
     };
     let v = transfer::run(client, &video_job, split.progress[0].clone(), split.stop.clone());

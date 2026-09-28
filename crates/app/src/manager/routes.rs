@@ -39,9 +39,17 @@ impl Manager {
         self.with_settings(|s| s.proxy.mode == ProxyMode::Auto && !s.proxy.url.is_empty())
     }
 
+    /// The client for a download of `url`: its route, and — when it starts on the Internet and names
+    /// are resolved here — no way into the local network through a name (see `engine::net`).
+    pub(super) async fn client_for_url(&self, url: &Url, via_proxy: bool, insecure: bool) -> Result<Client, String> {
+        let route = self.route(via_proxy);
+        let public_only = resolves_here(&route) && !engine::net::reaches_lan(url).await;
+        self.client_for(route, insecure, public_only)
+    }
+
     /// The client for a route (built once, then shared). An unusable proxy address is an error.
-    pub(super) fn client_for(&self, route: Route, insecure: bool) -> Result<Client, String> {
-        let options = ClientOptions { route, insecure };
+    pub(super) fn client_for(&self, route: Route, insecure: bool, public_only: bool) -> Result<Client, String> {
+        let options = ClientOptions { route, insecure, public_only };
         let mut clients = lock(&self.clients);
         if let Some(client) = clients.get(&options) {
             return Ok(client.clone());
@@ -57,9 +65,15 @@ impl Manager {
         Ok(client)
     }
 
-    /// The client for requests on the browser's behalf (quality lists, link checks).
-    pub fn client(&self) -> Client {
-        self.client_for(self.route(false), false).or_else(|_| self.client_for(Route::Direct, false)).unwrap_or_else(|_| self.fallback.clone())
+    /// The client for requests on the browser's behalf about `url` (quality lists, link checks).
+    pub async fn client(&self, url: &Url) -> Client {
+        match self.client_for_url(url, false, false).await {
+            Ok(client) => client,
+            Err(_) => {
+                let public_only = !engine::net::reaches_lan(url).await;
+                self.client_for(Route::Direct, false, public_only).unwrap_or_else(|_| self.fallback.clone())
+            }
+        }
     }
 
     /// Settings changed: clients are rebuilt on next use (downloads running keep theirs).
@@ -100,7 +114,7 @@ impl Manager {
         let this = self.clone();
         self.rt.spawn(async move {
             let usable = !matches!(&route, Route::Proxy { url, .. } if !supported_proxy(url));
-            let Some(client) = engine::client_with(&ClientOptions { route, insecure: false }).ok().filter(|_| usable) else {
+            let Some(client) = engine::client_with(&ClientOptions { route, ..ClientOptions::default() }).ok().filter(|_| usable) else {
                 return this.notice(true, tr!("Adresse de proxy invalide.", "Invalid proxy address."));
             };
             let started = std::time::Instant::now();
@@ -116,6 +130,34 @@ impl Manager {
             }
         });
     }
+}
+
+/// Whether target names are resolved on this computer (so RDM can keep them out of the local
+/// network): a direct connection. A proxy resolves them itself — and may be on the local network,
+/// by name — the system's proxy included when one is set.
+fn resolves_here(route: &Route) -> bool {
+    match route {
+        Route::Direct => true,
+        Route::System => !system_proxy_set(),
+        Route::Proxy { .. } => false,
+    }
+}
+
+/// A proxy the system sets (what the engine follows in `Route::System`): the `*_PROXY` variables,
+/// or on Windows the proxy of the Internet settings.
+fn system_proxy_set() -> bool {
+    let variable = ["http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"]
+        .iter()
+        .any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty()));
+    #[cfg(windows)]
+    {
+        use winreg::{RegKey, enums::HKEY_CURRENT_USER};
+        let settings = RegKey::predef(HKEY_CURRENT_USER).open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings");
+        let enabled = settings.is_ok_and(|k| k.get_value::<u32, _>("ProxyEnable").is_ok_and(|v| v != 0));
+        variable || enabled
+    }
+    #[cfg(not(windows))]
+    variable
 }
 
 /// `host:port` alone means an HTTP proxy.
@@ -195,6 +237,12 @@ mod tests {
         for (plain, encoded) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foobar", "Zm9vYmFy"), ("user:pässword", "dXNlcjpww6Rzc3dvcmQ=")] {
             assert_eq!(base64(plain.as_bytes()), encoded, "{plain}");
         }
+    }
+
+    #[test]
+    fn names_are_kept_out_of_the_lan_only_where_resolved_here() {
+        assert!(resolves_here(&Route::Direct));
+        assert!(!resolves_here(&Route::Proxy { url: "http://proxy.lan:3128".into(), user: String::new(), password: String::new() }));
     }
 
     #[test]

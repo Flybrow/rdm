@@ -304,10 +304,20 @@ pub async fn check(client: &reqwest::Client) -> Result<Option<Release>, String> 
     }
     Ok(Some(Release {
         version: r.tag_name.trim_start_matches(['v', 'V']).to_owned(),
-        page: r.html_url,
+        page: release_page(r.html_url),
         notes: r.body.unwrap_or_default(),
         package: package(&r.assets, method()),
     }))
+}
+
+/// The release's page, opened by the system as is: a GitHub web page, nothing else (the system
+/// would run a program's path just as well).
+fn release_page(html_url: String) -> String {
+    if html_url.starts_with("https://github.com/") && !html_url.contains(char::is_whitespace) {
+        html_url
+    } else {
+        format!("https://github.com/{}/releases/latest", repo().unwrap_or_default())
+    }
 }
 
 /// Where release assets may be downloaded from (HTTPS, GitHub only).
@@ -905,6 +915,15 @@ mod tests {
         // Replayed as another version, the same packages are refused.
         let msi = package(&release.assets, Method::Msi).unwrap();
         assert!(download(&client, "99.0.0", &msi, |_| {}).await.is_err());
+    }
+
+    #[test]
+    fn only_github_pages_are_opened() {
+        let page = "https://github.com/o/r/releases/tag/v9.0.0";
+        assert_eq!(release_page(page.into()), page);
+        for odd in [r"C:\Windows\System32\calc.exe", "file:///etc/passwd", "https://github.com.evil.io/x", "https://github.com/x y"] {
+            assert!(release_page(odd.into()).ends_with("/releases/latest"), "{odd}");
+        }
     }
 
     #[test]

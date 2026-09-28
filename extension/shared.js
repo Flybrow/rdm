@@ -6,7 +6,7 @@ const extOf = (name = "") => {
   const path = name.includes("://") ? name.split(/[?#]/)[0] : name;
   const file = path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
   const dot = file.lastIndexOf(".");
-  return dot > 0 ? file.slice(dot + 1).toLowerCase() : "";
+  return dot >= 0 ? file.slice(dot + 1).toLowerCase() : "";
 };
 
 // .r00 .r01 … and .001 .002 …: parts of split archives.

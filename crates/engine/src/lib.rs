@@ -46,10 +46,15 @@ pub async fn run(
         Some(audio) => merged::run(client, job, audio, progress, cancel).await,
         None => transfer::run(client, job, progress, cancel).await,
     };
-    if let Err(e) = &result {
-        e.forget_address();
+    match result {
+        // Said plainly: a name of the Internet content resolved into the local network.
+        Err(EngineError::Http(e)) if net::is_lan_blocked(&e) => Err(EngineError::LocalNetwork),
+        Err(e) => {
+            e.forget_address();
+            Err(e)
+        }
+        ok => ok,
     }
-    result
 }
 
 /// Qualities offered by an HLS playlist (for a quality picker) and its container.
@@ -115,6 +120,7 @@ impl EngineError {
                     || e.is_builder()
                     || e.status().is_some_and(|s| s.is_client_error() && !matches!(s.as_u16(), 408 | 425 | 429))
                     || self.is_certificate()
+                    || net::is_lan_blocked(e)
             }
             Self::Io(_) | Self::Empty | Self::LocalNetwork | Self::Playlist(_) | Self::Mux(_) => true,
             Self::RangeIgnored | Self::Truncated => false,
@@ -201,6 +207,10 @@ pub struct ClientOptions {
     pub route: Route,
     /// Accept invalid TLS certificates (a download the user explicitly exempted).
     pub insecure: bool,
+    /// A download that starts on the Internet: no connection into the local network, whatever the
+    /// names it meets resolve to ([`net::PublicDns`]). Not through a proxy, which resolves the
+    /// names itself (and may well be on the local network).
+    pub public_only: bool,
 }
 
 /// The default client: system proxy, certificates checked.
@@ -214,7 +224,8 @@ pub fn client() -> reqwest::Result<Client> {
 /// - kept-alive pool sized for the max connection count, so stolen segments reuse warm TLS sessions;
 /// - names resolved once per minute and shared ([`net::CachedDns`]): 32 connections to one server
 ///   cost one DNS lookup, not 32 (a slow resolver no longer delays every connection);
-/// - redirects may not lead from the Internet into the local network (SSRF).
+/// - redirects may not lead from the Internet into the local network (SSRF), and with
+///   `public_only` no name may resolve into it either.
 ///
 /// Privacy: no telemetry, no update ping; a browser-like User-Agent so the client is not fingerprinted as RDM.
 pub fn client_with(options: &ClientOptions) -> reqwest::Result<Client> {
@@ -240,6 +251,9 @@ pub fn client_with(options: &ClientOptions) -> reqwest::Result<Client> {
         .dns_resolver(net::CachedDns::shared())
         .redirect(redirects)
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36");
+    if options.public_only && !matches!(options.route, Route::Proxy { .. }) {
+        builder = builder.dns_resolver(Arc::new(net::PublicDns));
+    }
     builder = route(builder, &options.route)?;
     if options.insecure {
         builder = builder.danger_accept_invalid_certs(true);
@@ -284,7 +298,7 @@ mod tests {
         for url in ["http://p:3128", "https://p:3128", "socks5://p:1080", "socks5h://p:1080", "socks4://p:1080", "SOCKS4A://p:1080"] {
             for user in ["", "me"] {
                 let route = Route::Proxy { url: url.into(), user: user.into(), password: "pw".into() };
-                assert!(client_with(&ClientOptions { route, insecure: false }).is_ok(), "{url} {user}");
+                assert!(client_with(&ClientOptions { route, ..ClientOptions::default() }).is_ok(), "{url} {user}");
             }
         }
     }

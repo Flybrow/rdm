@@ -172,7 +172,9 @@
         items.push(action(filename, detail, v.url, filename, bestAudio.url, via));
       }
     }
-    const muxed = formats.filter((f) => f.video && f.audio).sort((a, b) => b.height - a.height);
+    // The container becomes the file's extension: only the ones YouTube serves, whatever a page
+    // script answers in youtube.js's place.
+    const muxed = formats.filter((f) => f.video && f.audio && /^(mp4|webm|3gpp)$/.test(f.container)).sort((a, b) => b.height - a.height);
     if (muxed.length) {
       items.push(section(t("videoWithSound")));
       for (const m of muxed) {

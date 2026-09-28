@@ -118,8 +118,9 @@ pub fn run_host() {
         }
         let (stdout, slots) = (stdout.clone(), slots.clone());
         std::thread::spawn(move || {
+            let id = request.id;
             let reply = handle(request);
-            if let Ok(json) = serde_json::to_vec(&reply) {
+            if let Ok(json) = serde_json::to_vec(&reply).map(|json| fit(id, json)) {
                 let mut out = stdout.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let _ = write_message(&mut *out, &json);
             }
@@ -140,6 +141,17 @@ fn read_message(input: &mut impl Read) -> Option<Vec<u8>> {
     let mut message = vec![0u8; len as usize];
     input.read_exact(&mut message).ok()?;
     Some(message)
+}
+
+/// A reply the browser accepts: it ends the whole connection on a message over 1 MB (JSON escaping
+/// can make a body under `MAX_REPLY` exceed it). Too large: "refused here", and the extension
+/// asks the bridge itself.
+fn fit(id: u64, json: Vec<u8>) -> Vec<u8> {
+    const BROWSER_LIMIT: usize = 1024 * 1024;
+    if json.len() <= BROWSER_LIMIT {
+        return json;
+    }
+    serde_json::to_vec(&Reply { id, status: REFUSED, body: String::new() }).unwrap_or_default()
 }
 
 fn write_message(out: &mut impl Write, json: &[u8]) -> io::Result<()> {
@@ -178,6 +190,11 @@ fn bridge_addr() -> SocketAddr {
 
 /// One HTTP/1.1 request to the bridge (`Connection: close`): status and body.
 fn bridge_call(method: Method, path: &str, body: Option<&[u8]>, browser: Option<&str>, timeout: Duration) -> io::Result<(u16, Vec<u8>)> {
+    // The page's cookies go only to the user's own RDM: never to another account's program
+    // holding the port (it would pose as RDM). Reported as "RDM is not running".
+    if !crate::local::bridge_is_ours() {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
     let mut stream = TcpStream::connect_timeout(&bridge_addr(), Duration::from_secs(2))?;
     stream.set_nodelay(true)?;
     stream.set_write_timeout(Some(timeout))?;
@@ -186,6 +203,10 @@ fn bridge_call(method: Method, path: &str, body: Option<&[u8]>, browser: Option<
     let mut head = format!("{verb} {path} HTTP/1.1\r\nHost: 127.0.0.1:{BRIDGE_PORT}\r\nConnection: close\r\n");
     if let Some(browser) = browser {
         head.push_str(&format!("x-rdm-browser: {browser}\r\n"));
+    }
+    // The connector is the user's: it proves it with the token RDM wrote in the user's files.
+    if let Some(token) = crate::local::read_token() {
+        head.push_str(&format!("{}: {token}\r\n", crate::local::TOKEN_HEADER));
     }
     if let Some(body) = body {
         head.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n", body.len()));
@@ -474,6 +495,16 @@ mod tests {
         let mut huge = (MAX_REQUEST + 1).to_ne_bytes().to_vec();
         huge.extend_from_slice(b"xx");
         assert!(read_message(&mut huge.as_slice()).is_none(), "oversized: the connector stops");
+    }
+
+    #[test]
+    fn replies_stay_within_what_browsers_accept() {
+        let small = serde_json::to_vec(&Reply { id: 7, status: 200, body: "rdm".into() }).unwrap();
+        assert_eq!(fit(7, small.clone()), small);
+        // Quotes are escaped: a body under MAX_REPLY grows past the browsers' 1 MB.
+        let big = serde_json::to_vec(&Reply { id: 7, status: 200, body: "\"".repeat(MAX_REPLY - 100) }).unwrap();
+        let reply: Value = serde_json::from_slice(&fit(7, big)).unwrap();
+        assert_eq!((reply["id"].as_u64(), reply["status"].as_u64()), (Some(7), Some(u64::from(REFUSED))));
     }
 
     #[test]

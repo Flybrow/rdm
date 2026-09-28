@@ -29,6 +29,8 @@ test("user list syntax is forgiving", () => {
   assert.ok(isCapturable(".iso, .ZIP", "a.zip"));
   assert.ok(!isCapturable("iso", "a.zip"));
   assert.ok(!isCapturable("", "a.zip"));
+  assert.ok(isCapturable("iso\nzip\tmkv", "a.zip"), "one per line, as typed in RDM's settings");
+  assert.ok(isCapturable(LIST, ".zip"), "a name that is only an extension, as in Rust");
 });
 
 test("media and HLS detection", () => {

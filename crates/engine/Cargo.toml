@@ -19,6 +19,8 @@ serde.workspace = true
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 memmap2 = "0.9"
+# HTTP dates (already in the tree through hyper): telling a file's date from "now".
+httpdate = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_IO", "Win32_System_Ioctl"] }

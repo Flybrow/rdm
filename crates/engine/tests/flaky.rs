@@ -29,6 +29,8 @@ struct Faults {
     cut_every: usize,
     /// While set, every connection is dropped at once (network down).
     down: AtomicBool,
+    /// A range covering the whole file gets `200 OK` and the whole file (RFC 9110 allows it).
+    whole_as_200: bool,
 }
 
 struct Server {
@@ -84,13 +86,14 @@ async fn handle(mut socket: TcpStream, faults: &Faults, data: &[u8], served: &At
             (a, b)
         });
         let (start, end) = range.unwrap_or((0, data.len() - 1));
+        let whole = faults.whole_as_200 && start == 0 && end == data.len() - 1;
         let head = match range {
-            Some(_) => format!(
+            Some(_) if !whole => format!(
                 "HTTP/1.1 206 Partial Content\r\ncontent-range: bytes {start}-{end}/{}\r\ncontent-length: {}\r\n\r\n",
                 data.len(),
                 end - start + 1
             ),
-            None => format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", data.len()),
+            _ => format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", data.len()),
         };
         socket.write_all(head.as_bytes()).await?;
         let slice = &data[start..=end];
@@ -186,6 +189,16 @@ async fn respects_a_speed_limit_without_timeouts() {
     let took = started.elapsed().as_secs_f64();
     assert!((2.0..10.0).contains(&took), "took {took:.1} s");
     assert!(server.peak.load(SeqCst) <= 16 + 1, "at most one connection per 256 KiB/s: peak {}", server.peak.load(SeqCst));
+    assert_intact(&path);
+}
+
+/// One connection asks for the whole file (`bytes=0-<last>`): a server may answer `200` with the
+/// whole file instead of `206`, which is exactly what was asked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn accepts_a_whole_file_answer_to_a_whole_file_range() {
+    let server = serve(Arc::new(Faults { whole_as_200: true, ..Faults::default() })).await;
+    let (result, path) = download(server.url, target("whole"), 1).await;
+    assert_eq!(result.unwrap(), Outcome::Completed);
     assert_intact(&path);
 }
 

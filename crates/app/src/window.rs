@@ -61,7 +61,7 @@ pub fn on_screen(x: f32, y: f32) -> bool {
             Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromPoint},
         };
         // A point inside the title bar, where the user grabs the window.
-        let grip = POINT { x: x as i32 + 48, y: y as i32 + 12 };
+        let grip = POINT { x: (x as i32).saturating_add(48), y: (y as i32).saturating_add(12) };
         // SAFETY: pure query on a plain value.
         !unsafe { MonitorFromPoint(grip, MONITOR_DEFAULTTONULL) }.is_null()
     }

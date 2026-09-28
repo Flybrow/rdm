@@ -90,11 +90,14 @@ pub fn default_captured() -> String {
     all.join(" ")
 }
 
-/// `true` if the file name / URL ends with an extension from `list` (space/comma separated),
-/// or is a split archive part (`.r00`, `.r01`…, `.001`, `.002`…).
+/// `true` if the file name / URL ends with an extension from `list` (separated by spaces, line
+/// breaks, commas or semicolons: the settings edit it as free text), or is a split archive part
+/// (`.r00`, `.r01`…, `.001`, `.002`…).
 pub fn is_capturable(list: &str, name: &str) -> bool {
     let ext = extension(name);
-    !ext.is_empty() && (is_split_archive(&ext) || list.split([' ', ',', ';']).any(|e| e.trim().trim_start_matches('.').eq_ignore_ascii_case(&ext)))
+    !ext.is_empty()
+        && (is_split_archive(&ext)
+            || list.split(|c: char| c.is_whitespace() || matches!(c, ',' | ';')).any(|e| e.trim_start_matches('.').eq_ignore_ascii_case(&ext)))
 }
 
 /// Lower-case extension of a file name, or of a URL's path. Only URLs lose their `?query` and
@@ -128,12 +131,15 @@ mod tests {
         assert!(!is_capturable(&list, "noext"));
         assert!(!is_capturable(&list, "https://x.io/dir.zip/page"));
         assert!(!is_capturable(&list, "archive.rar5x"));
+        assert!(is_capturable(&list, ".zip"), "a name that is only an extension (same answer as the extension)");
     }
 
     #[test]
     fn user_list_is_respected() {
         assert!(is_capturable(".iso, .ZIP", "a.zip"));
         assert!(!is_capturable("iso", "a.zip"));
+        assert!(is_capturable("iso\nzip\tmkv", "a.zip"), "one per line, as typed in the settings");
+        assert!(!is_capturable("", "a.zip"));
     }
 
     #[test]
