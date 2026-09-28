@@ -47,7 +47,7 @@ jobs:
         run: |
           sh packaging/firefox/build.sh
           sh packaging/chromium/build.sh
-          npx --yes web-ext@8.57.0 lint --source-dir target/firefox
+          npx --yes web-ext@8.10.0 lint --source-dir target/firefox
 
       - name: Dependency audit (RustSec)
         if: runner.os == 'Linux'
@@ -94,7 +94,7 @@ jobs:
             cp target/debian/*.deb target/generate-rpm/*.rpm dist/
             cp target/rdm-chromium.zip dist/
             if [ -n "$AMO_JWT_ISSUER" ] && [ -n "$AMO_JWT_SECRET" ] && [ "${GITHUB_REF#refs/tags/v}" != "$GITHUB_REF" ]; then
-              npx --yes web-ext@8.57.0 sign --channel=unlisted --source-dir target/firefox --artifacts-dir target/signed \
+              npx --yes web-ext@8.10.0 sign --channel=unlisted --source-dir target/firefox --artifacts-dir target/signed \
                 --api-key "$AMO_JWT_ISSUER" --api-secret "$AMO_JWT_SECRET"
               cp target/signed/*.xpi dist/rdm-firefox.xpi
             else
