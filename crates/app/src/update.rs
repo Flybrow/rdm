@@ -888,6 +888,25 @@ mod tests {
         assert!(!format_matches("a.exe", b"MZ"));
     }
 
+    /// The latest published release, end to end: every package downloads and passes the checks
+    /// (GitHub's SHA-256, format, Ed25519 signature). `cargo test -p rdm -- --ignored published`
+    #[tokio::test]
+    #[ignore = "network: downloads the published release"]
+    async fn published_release_packages_verify() {
+        let client = reqwest::Client::builder().user_agent("rdm-test").build().unwrap();
+        let release = latest(&client).await.unwrap().expect("a published release");
+        let version = release.tag_name.trim_start_matches(['v', 'V']).to_owned();
+        for method in [Method::Msi, Method::Binary, Method::Deb, Method::Rpm] {
+            let package = package(&release.assets, method).unwrap_or_else(|| panic!("{method:?}: no signed package"));
+            let file = download(&client, &version, &package, |_| {}).await.unwrap_or_else(|e| panic!("{method:?}: {e}"));
+            println!("{method:?}: {} verified", package.name);
+            let _ = std::fs::remove_file(file);
+        }
+        // Replayed as another version, the same packages are refused.
+        let msi = package(&release.assets, Method::Msi).unwrap();
+        assert!(download(&client, "99.0.0", &msi, |_| {}).await.is_err());
+    }
+
     #[test]
     fn assistant_arguments() {
         assert!(!run_assistant(&["--minimized".into()]));
