@@ -47,7 +47,7 @@ jobs:
         run: |
           sh packaging/firefox/build.sh
           sh packaging/chromium/build.sh
-          npx --yes web-ext@8.10.0 lint --source-dir target/firefox
+          npx --yes web-ext@8.10.0 lint --self-hosted --source-dir target/firefox
 
       - name: Dependency audit (RustSec)
         if: runner.os == 'Linux'
