@@ -172,6 +172,11 @@ fn handle(req: Request) -> Reply {
         _ => None,
     };
     let timeout = req.timeout.map_or(Duration::from_secs(5), Duration::from_millis).clamp(Duration::from_millis(500), MAX_TIMEOUT);
+    if starts_rdm {
+        // Started by the browser the user is in, the connector may hand RDM the foreground:
+        // without it Windows keeps RDM's window (a download to confirm) behind the browser.
+        crate::window::allow_foreground_handoff();
+    }
     let call = || bridge_call(req.method, &req.path, body.as_deref(), browser.as_deref(), timeout);
     let result = match call() {
         Err(e) if e.kind() == io::ErrorKind::ConnectionRefused && starts_rdm && start_rdm(&req.path) => call(),

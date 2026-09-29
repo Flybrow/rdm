@@ -86,6 +86,9 @@ pub struct Settings {
     pub category_dirs: BTreeMap<Category, PathBuf>,
     /// Extensions the browser extension hands over to RDM (space-separated).
     pub captured: String,
+    /// A download sent by the browser extension waits in RDM's window (brought to the front)
+    /// for the user's go-ahead; off: it starts right away.
+    pub confirm_browser: bool,
     pub connections: u8,
     /// Downloads of the main queue running at once; the rest wait.
     pub max_parallel: u8,
@@ -129,6 +132,7 @@ impl Default for Settings {
             categorize: true,
             category_dirs: BTreeMap::new(),
             captured: domain::default_captured(),
+            confirm_browser: true,
             connections: domain::DEFAULT_CONNECTIONS,
             max_parallel: 3,
             queues: Vec::new(),

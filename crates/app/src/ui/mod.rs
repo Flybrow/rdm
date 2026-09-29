@@ -450,6 +450,8 @@ struct App<'a> {
     edit: Option<edit::Editor>,
     /// "Delete the file" asked: waiting for the user's confirmation.
     confirm_delete: Option<DownloadId>,
+    /// "Don't ask again" ticked in the browser download's confirmation.
+    confirm_always: bool,
     toasts: Toasts,
     /// Something on screen moves this frame (progress, spinner): keep redrawing.
     animating: bool,
@@ -487,6 +489,7 @@ impl<'a> App<'a> {
             browsers: None,
             edit: None,
             confirm_delete: None,
+            confirm_always: false,
             toasts: Toasts::default(),
             animating: false,
             settle_frames: 0,
@@ -676,6 +679,7 @@ impl eframe::App for App<'_> {
         self.edit_dialog(ctx);
         self.delete_dialog(ctx);
         self.firefox_prompt(ctx);
+        self.confirm_prompt(ctx);
         self.apply(ctx, actions);
         if overlays != (self.settings.is_some(), self.report.is_some(), self.browsers.is_some(), self.edit.is_some(), self.confirm_delete.is_some()) {
             self.settle_frames = 2;

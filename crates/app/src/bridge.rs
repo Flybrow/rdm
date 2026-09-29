@@ -154,7 +154,7 @@ async fn add(State(manager): State<Arc<Manager>>, headers: HeaderMap, Json(req):
     if !web(&req.url) || req.audio_url.as_ref().is_some_and(|u| !web(u)) {
         return StatusCode::BAD_REQUEST;
     }
-    manager.add(req);
+    manager.add_from_browser(req);
     StatusCode::ACCEPTED
 }
 

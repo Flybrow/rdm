@@ -250,6 +250,76 @@ impl App<'_> {
         }
     }
 
+    /// A download sent by the browser waits for the user's go-ahead (`confirm_browser`).
+    pub(super) fn confirm_prompt(&mut self, ctx: &Context) {
+        let Some((url, filename, exists, waiting)) = self.manager.to_confirm() else { return };
+        let p = Palette::from_ctx(ctx);
+        let name = filename.unwrap_or_else(|| engine::suggest_file_name(&url, None));
+        // None: cancel; Some(existing): download, with that answer if the file is already there.
+        let mut answer: Option<Option<ExistingFile>> = None;
+        let mut cancel = false;
+        Modal::new(Id::new("confirm-browser")).frame(dialog_frame(&p)).backdrop_color(backdrop(&p)).show(ctx, |ui| {
+            ui.set_width(500.0);
+            let subtitle = if waiting > 1 {
+                let more = crate::i18n::count(waiting as u64 - 1, ("autre en attente", "autres en attente"), ("more waiting", "more waiting"));
+                trf!("Envoyé par le navigateur · {more}", "Sent by the browser · {more}")
+            } else {
+                tr!("Envoyé par le navigateur", "Sent by the browser").to_owned()
+            };
+            if dialog_header(ui, &p, icon::DOWNLOAD_SIMPLE, p.accent, tr!("Nouveau téléchargement", "New download"), &subtitle) {
+                cancel = true;
+            }
+            ui.add_space(14.0);
+            Frame::new().fill(p.raised).corner_radius(12).inner_margin(Margin::same(12)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(Label::new(RichText::new(&name).font(theme::semibold(14.0)).color(p.text)).wrap());
+                ui.add_space(4.0);
+                ui.add(Label::new(RichText::new(url.as_str()).monospace().small().color(p.muted)).truncate());
+            });
+            if exists {
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new(tr!(
+                        "Un fichier de ce nom est déjà dans le dossier de téléchargement.",
+                        "A file of this name is already in the download folder."
+                    ))
+                    .color(p.warning),
+                );
+            }
+            ui.add_space(12.0);
+            toggle(
+                ui,
+                &mut self.confirm_always,
+                tr!("Ne plus demander", "Don't ask again"),
+                tr!("Réactivable dans les paramètres", "Can be turned back on in the settings"),
+            );
+            ui.add_space(16.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if exists {
+                    if accent_button(ui, icon::COPY, tr!("Télécharger à côté", "Keep both")).clicked() {
+                        answer = Some(Some(ExistingFile::Rename));
+                    }
+                    if ghost_button(ui, icon::ARROWS_CLOCKWISE, tr!("Remplacer", "Replace")).clicked() {
+                        answer = Some(Some(ExistingFile::Overwrite));
+                    }
+                } else if accent_button(ui, icon::DOWNLOAD_SIMPLE, tr!("Télécharger", "Download")).clicked() {
+                    answer = Some(None);
+                }
+                if ghost_button(ui, icon::X, tr!("Annuler", "Cancel")).clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if cancel {
+            self.manager.answer_confirm(false, None, false);
+            self.confirm_always = false;
+        } else if let Some(existing) = answer {
+            // "Don't ask again" only counts with a download: cancelling one link says nothing about the next.
+            self.manager.answer_confirm(true, existing, self.confirm_always);
+            self.confirm_always = false;
+        }
+    }
+
     /// A Firefox extension asked to use the bridge: the user approves its (per-install) origin once.
     pub(super) fn firefox_prompt(&self, ctx: &Context) {
         let Some(origin) = self.manager.firefox_pending() else { return };
@@ -433,6 +503,13 @@ fn settings_form(
                 action = Some(FormAction::Window(Action::OpenBrowsers));
             }
         });
+        ui.add_space(6.0);
+        toggle(
+            ui,
+            &mut s.confirm_browser,
+            tr!("Confirmer les téléchargements du navigateur", "Confirm downloads from the browser"),
+            tr!("RDM passe au premier plan et attend votre accord", "RDM comes to the front and waits for your go-ahead"),
+        );
         ui.add_space(10.0);
         caption(ui, tr!("LIENS COPIÉS DANS LE PRESSE-PAPIERS", "LINKS COPIED TO THE CLIPBOARD"));
         ui.add_space(4.0);

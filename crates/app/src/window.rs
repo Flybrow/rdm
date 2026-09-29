@@ -35,11 +35,17 @@ impl Window {
         if self.hwnd != 0 {
             let hwnd = self.hwnd as win::HWND;
             // SAFETY: our own top-level window, alive while attached to the shell; the async
-            // variant only posts a message, and `IsIconic` / `SetForegroundWindow` only read or
+            // variants only post messages, and `IsIconic` / `SetForegroundWindow` only read or
             // request state: safe from any thread, never blocking.
             unsafe {
                 win::ShowWindowAsync(hwnd, if win::IsIconic(hwnd) != 0 { win::SW_RESTORE } else { win::SW_SHOW });
-                win::SetForegroundWindow(hwnd);
+                if win::SetForegroundWindow(hwnd) == 0 {
+                    // Windows refuses the focus to a program in the background (the browser has
+                    // it): the window still comes above the others, without taking the keyboard.
+                    let flags = win::SWP_NOMOVE | win::SWP_NOSIZE | win::SWP_NOACTIVATE | win::SWP_ASYNCWINDOWPOS;
+                    win::SetWindowPos(hwnd, win::HWND_TOPMOST, 0, 0, 0, 0, flags);
+                    win::SetWindowPos(hwnd, win::HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+                }
             }
             ctx.request_repaint();
             return;
@@ -95,7 +101,8 @@ mod win {
     pub use windows_sys::Win32::{
         Foundation::HWND,
         UI::WindowsAndMessaging::{
-            ASFW_ANY, AllowSetForegroundWindow, IsIconic, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindowAsync,
+            ASFW_ANY, AllowSetForegroundWindow, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, SW_RESTORE, SW_SHOW, SWP_ASYNCWINDOWPOS,
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetWindowPos, ShowWindowAsync,
         },
     };
 }

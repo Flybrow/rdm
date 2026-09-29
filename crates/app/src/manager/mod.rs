@@ -77,11 +77,14 @@ pub struct AddRequest {
     pub referrer: Option<String>,
     pub cookies: Option<String>,
     pub user_agent: Option<String>,
+    /// The user's answer for this download when its file already exists (else the settings').
+    #[serde(skip)]
+    pub existing: Option<ExistingFile>,
 }
 
 impl AddRequest {
     pub fn from_url(url: Url) -> Self {
-        Self { url, audio_url: None, filename: None, referrer: None, cookies: None, user_agent: None }
+        Self { url, audio_url: None, filename: None, referrer: None, cookies: None, user_agent: None, existing: None }
     }
 
     pub fn headers(&self) -> Vec<(String, String)> {
@@ -385,6 +388,8 @@ pub struct Manager {
     secrets: Mutex<Secrets>,
     /// Links found in the clipboard, waiting for a click.
     offer: Mutex<Option<clipboard::Offer>>,
+    /// Downloads sent by the browser, waiting for the user's go-ahead (`confirm_browser`).
+    to_confirm: Mutex<VecDeque<AddRequest>>,
     /// Text RDM copied itself (not offered back).
     own_copy: Mutex<Option<String>>,
     /// Short messages for the window (results of background actions).
@@ -524,6 +529,7 @@ impl Manager {
             clients: Mutex::default(),
             secrets: Mutex::new(Secrets::load()),
             offer: Mutex::default(),
+            to_confirm: Mutex::default(),
             own_copy: Mutex::default(),
             notices: Mutex::default(),
             restart_after_exit: AtomicBool::new(false),
@@ -826,11 +832,58 @@ impl Manager {
 
     /// Shows the download in the list at once; without a name from the page, the server is asked
     /// for the real one in the background (bounded), and the download starts right after.
+    /// A download from the browser extension: added at once, or first shown in the (raised)
+    /// window for the user's go-ahead, as the settings say.
+    pub fn add_from_browser(self: &Arc<Self>, req: AddRequest) {
+        if !self.with_settings(|s| s.confirm_browser) {
+            return self.add(req);
+        }
+        {
+            let mut waiting = lock(&self.to_confirm);
+            if waiting.iter().any(|w| w.url == req.url) {
+                return; // the very same link, just sent twice
+            }
+            waiting.push_back(req);
+        }
+        self.show();
+        self.repaint();
+    }
+
+    /// The first browser download waiting for the user's go-ahead: its link, its name (when the
+    /// page gave one), whether a file of that name is already in its folder, and how many wait.
+    pub fn to_confirm(&self) -> Option<(Url, Option<String>, bool, usize)> {
+        let waiting = lock(&self.to_confirm);
+        let req = waiting.front()?;
+        let name = req.filename.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(engine::sanitize_file_name);
+        let exists = name.as_deref().is_some_and(|n| self.with_settings(|s| s.target_dir(n)).join(n).is_file());
+        Some((req.url.clone(), name, exists, waiting.len()))
+    }
+
+    /// The user answered for the first waiting download: `download` it or not, with `existing`
+    /// as the answer for a file already there; `always`: stop asking (the ones still waiting then
+    /// start too).
+    pub fn answer_confirm(self: &Arc<Self>, download: bool, existing: Option<ExistingFile>, always: bool) {
+        let Some(mut req) = lock(&self.to_confirm).pop_front() else { return };
+        if download {
+            req.existing = existing;
+            self.add(req);
+        }
+        if always {
+            let mut settings = self.settings();
+            settings.confirm_browser = false;
+            self.apply_settings(settings);
+            self.save_settings();
+            let rest: Vec<_> = lock(&self.to_confirm).drain(..).collect();
+            rest.into_iter().for_each(|r| self.add(r));
+        }
+        self.repaint();
+    }
+
     pub fn add(self: &Arc<Self>, req: AddRequest) {
         let headers = req.headers();
         let given = req.filename.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(engine::sanitize_file_name);
         let provisional = given.clone().unwrap_or_else(|| engine::suggest_file_name(&req.url, None));
-        let Some(id) = self.insert(req.url.clone(), req.audio_url, &provisional, headers.clone(), given.is_none()) else {
+        let Some(id) = self.insert(req.url.clone(), req.audio_url, &provisional, headers.clone(), given.is_none(), req.existing) else {
             return; // the very same link, just sent twice
         };
         if given.is_some() {
@@ -1502,8 +1555,19 @@ impl Manager {
     }
 
     /// `None` when the same link was added a moment ago (a double click, a page asking twice).
-    fn insert(&self, url: Url, audio: Option<Url>, name: &str, headers: Vec<(String, String)>, resolving: bool) -> Option<DownloadId> {
-        let settings = self.settings();
+    fn insert(
+        &self,
+        url: Url,
+        audio: Option<Url>,
+        name: &str,
+        headers: Vec<(String, String)>,
+        resolving: bool,
+        existing: Option<ExistingFile>,
+    ) -> Option<DownloadId> {
+        let mut settings = self.settings();
+        if let Some(existing) = existing {
+            settings.existing = existing;
+        }
         let mut entries = lock(&self.entries);
         let twice = entries.iter().rev().take_while(|e| e.added.is_some_and(|t| t.elapsed() < DUPLICATE_WINDOW)).any(|e| {
             e.download.url == url && e.download.audio == audio && !matches!(e.download.status(), Status::Failed(_))
