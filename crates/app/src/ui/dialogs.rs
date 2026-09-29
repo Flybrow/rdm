@@ -177,7 +177,7 @@ impl App<'_> {
                 tr!("Chaque changement est appliqué et enregistré aussitôt.", "Every change is applied and saved at once."),
             );
             ui.add_space(16.0);
-            segmented(
+            widgets::tab_bar(
                 ui,
                 &mut tab,
                 &[
@@ -467,10 +467,15 @@ fn settings_form(
             });
         }
         SettingsTab::Downloads => {
-            section(ui, p, icon::FOLDER, tr!("Emplacements", "Locations"), |ui| {
+            section(ui, p, icon::FOLDER, tr!("Dossier de téléchargement", "Download folder"), |ui| {
+                note(ui, p, tr!("Là où vont vos fichiers.", "Where your files go."));
+                ui.add_space(4.0);
                 if let Some(Some(dir)) = folder_row(ui, p, icon::HARD_DRIVES, tr!("Dossier principal", "Main folder"), &s.download_dir, false) {
                     s.download_dir = dir;
                 }
+            });
+
+            section(ui, p, icon::FOLDERS, tr!("Classement par type", "Sorting by type"), |ui| {
                 toggle(
                     ui,
                     &mut s.categorize,
@@ -490,9 +495,9 @@ fn settings_form(
                         None => {}
                     }
                 }
-                ui.add_space(10.0);
-                caption(ui, tr!("SI LE FICHIER EXISTE DÉJÀ", "IF THE FILE ALREADY EXISTS"));
-                ui.add_space(4.0);
+            });
+
+            section(ui, p, icon::COPY, tr!("Si le fichier existe déjà", "If the file already exists"), |ui| {
                 segmented(
                     ui,
                     &mut s.existing,
@@ -735,27 +740,45 @@ fn settings_form(
                 );
             });
 
-            section(ui, p, icon::GLOBE_HEMISPHERE_WEST, tr!("Réseau et proxy", "Network and proxy"), |ui| {
+            section(ui, p, icon::GLOBE_HEMISPHERE_WEST, tr!("Connexion à Internet (proxy)", "Internet connection (proxy)"), |ui| {
+                note(
+                    ui,
+                    p,
+                    tr!(
+                        "Un proxy est un serveur intermédiaire par lequel passent les téléchargements (réseau d'entreprise, école…). Dans le doute, gardez « Système ».",
+                        "A proxy is a go-between server that downloads pass through (company or school network…). If unsure, keep \"System\"."
+                    ),
+                );
+                ui.add_space(8.0);
                 segmented(
                     ui,
                     &mut s.proxy.mode,
                     &[
-                        (ProxyMode::Off, icon::PLUGS_CONNECTED, tr!("Direct", "Direct")),
+                        (ProxyMode::Off, icon::PLUGS_CONNECTED, tr!("Aucun", "None")),
                         (ProxyMode::System, icon::DESKTOP, tr!("Système", "System")),
                         (ProxyMode::Manual, icon::SHIELD, tr!("Toujours", "Always")),
-                        (ProxyMode::Auto, icon::MAGIC_WAND, tr!("Si lent", "If slow")),
+                        (ProxyMode::Auto, icon::MAGIC_WAND, tr!("En secours", "As a fallback")),
                     ],
                 );
                 note(
                     ui,
                     p,
                     match s.proxy.mode {
-                        ProxyMode::Off => tr!("Connexions directes, quel que soit le réglage du système.", "Direct connections, whatever the system says."),
-                        ProxyMode::System => tr!("Le proxy configuré dans le système, s'il y en a un.", "The proxy configured in the system, if any."),
-                        ProxyMode::Manual => tr!("Tous les téléchargements passent par le proxy ci-dessous.", "Every download goes through the proxy below."),
+                        ProxyMode::Off => tr!(
+                            "Aucun proxy : RDM se connecte directement aux sites, même si le système en indique un.",
+                            "No proxy: RDM connects to the sites directly, even if the system names one."
+                        ),
+                        ProxyMode::System => tr!(
+                            "Recommandé. RDM utilise le proxy réglé dans le système, s'il y en a un ; sinon il se connecte directement.",
+                            "Recommended. RDM uses the proxy set in the system, if there is one; otherwise it connects directly."
+                        ),
+                        ProxyMode::Manual => tr!(
+                            "Tous les téléchargements passent par le proxy que vous indiquez ci-dessous.",
+                            "Every download goes through the proxy you enter below."
+                        ),
                         ProxyMode::Auto => tr!(
-                            "Direct d'abord ; un téléchargement bloqué ou très lent bascule tout seul sur le proxy ci-dessous.",
-                            "Direct first; a download that is blocked or very slow switches to the proxy below by itself."
+                            "Connexion directe d'abord ; si un téléchargement est bloqué ou très lent, RDM passe tout seul par le proxy ci-dessous.",
+                            "Direct connection first; if a download is blocked or very slow, RDM switches to the proxy below by itself."
                         ),
                     },
                 );
@@ -781,7 +804,7 @@ fn settings_form(
                 }
                 if s.proxy.mode != ProxyMode::Off {
                     ui.add_space(4.0);
-                    if ghost_button(ui, icon::PLAY, tr!("Tester", "Test")).clicked() {
+                    if ghost_button(ui, icon::PLAY, tr!("Tester la connexion", "Test the connection")).clicked() {
                         action = Some(FormAction::TestProxy);
                     }
                 }

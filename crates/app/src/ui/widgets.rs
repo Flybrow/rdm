@@ -303,6 +303,49 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T,
     changed
 }
 
+/// Tabs: like `segmented`, but each tab as wide as its label (plus padding inside), with a gap
+/// between tabs and around them; spare width is shared out so the bar fills its line.
+pub fn tab_bar<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str, &str)]) -> bool {
+    const INSET: f32 = 5.0; // between the track's edge and the tabs
+    const GAP: f32 = 6.0; // between two tabs
+    const PAD: f32 = 16.0; // inside a tab, on each side of its label
+    let p = Palette::of(ui);
+    let label = |i: usize| format!("{}  {}", options[i].1, options[i].2);
+    // The selected tab's (semibold) width for every tab: selecting one does not move the others.
+    let natural: Vec<f32> = (0..options.len())
+        .map(|i| ui.painter().layout_no_wrap(label(i), theme::semibold(13.0), Color32::WHITE).size().x + 2.0 * PAD)
+        .collect();
+    let gaps = INSET * 2.0 + GAP * options.len().saturating_sub(1) as f32;
+    let needed = natural.iter().sum::<f32>() + gaps;
+    let width = ui.available_width().max(needed);
+    let extra = (width - needed) / options.len() as f32;
+    let (rect, own) = ui.allocate_exact_size(vec2(width, 44.0), Sense::hover());
+    let track = if p.dark { p.bg } else { p.border.lerp_to_gamma(p.raised, 0.35) };
+    ui.painter().rect_filled(rect, 13, track);
+    let mut changed = false;
+    let mut left = rect.left() + INSET;
+    for (i, (option, _, _)) in options.iter().enumerate() {
+        let cell = Rect::from_min_size(pos2(left, rect.top() + INSET), vec2(natural[i] + extra, rect.height() - 2.0 * INSET));
+        left += cell.width() + GAP;
+        let response = ui.interact(cell, own.id.with(("tab", i)), Sense::click());
+        if response.clicked() && *value != *option {
+            *value = *option;
+            changed = true;
+        }
+        let selected = *value == *option;
+        let painter = ui.painter();
+        if selected {
+            soft_shadow(painter, cell, 9, 0.5, p.dark);
+            painter.rect_filled(cell, 9, p.surface);
+        } else if response.hovered() {
+            painter.rect_filled(cell, 9, p.surface.gamma_multiply(0.5));
+        }
+        let (color, font) = if selected { (p.text, theme::semibold(13.0)) } else { (p.muted, theme::regular(13.0)) };
+        painter.text(cell.center(), Align2::CENTER_CENTER, label(i), font, color);
+    }
+    changed
+}
+
 // ── Charts ───────────────────────────────────────────────────────────────
 /// Area chart of `samples` (oldest first): gradient line, fill fading downwards, a glowing head.
 pub fn area_chart(ui: &Ui, rect: Rect, samples: &[f32]) {
