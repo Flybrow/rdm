@@ -521,7 +521,7 @@ impl<'a> App<'a> {
         settings.extension_offered = true;
         self.manager.apply_settings(settings);
         self.manager.save_settings();
-        if crate::extension::Browser::ALL.into_iter().all(|b| self.manager.browser_last_seen(b).is_none()) {
+        if self.manager.browsers_seen().is_empty() {
             self.open_browsers();
         }
     }

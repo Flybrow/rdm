@@ -1,4 +1,4 @@
-import { downloadName, isCapturable, isHls, isMediaType, isMediaUrl, siteOf } from "./shared.js";
+import { browserKey, downloadName, isCapturable, isHls, isMediaType, isMediaUrl, siteOf } from "./shared.js";
 
 // Chrome, Brave, Opera, Edge (`chrome`) and Firefox (`browser`): same promise-based API.
 const ext = globalThis.browser ?? globalThis.chrome;
@@ -27,22 +27,25 @@ const media = {
 let queue = Promise.resolve();
 const serially = (task) => (queue = queue.then(task).catch(() => {}));
 
-/** Which browser this is, for RDM's extension window (`x-rdm-browser`). */
+/**
+ * Which browser this is, for RDM's extension window (`x-rdm-browser`): any browser, named by
+ * `browserKey` (RDM computes the same key from the names Windows gives its browsers).
+ */
 const BROWSER = (async () => {
   const info = globalThis.browser?.runtime?.getBrowserInfo;
   if (typeof info === "function") {
-    // Firefox and its derivatives (Waterfox reports its own name here, not in its User-Agent).
+    // Firefox and its derivatives report their own name here (Waterfox, LibreWolf, Floorp, Zen…).
     const { name = "" } = await info().catch(() => ({}));
-    return /waterfox/i.test(name) ? "waterfox" : "firefox";
+    return browserKey(name) || "firefox";
   }
+  // Chromium-based: the browser's own brand, when it gives one (not Brave, Opera: see below).
   const brands = (navigator.userAgentData?.brands ?? []).map((b) => b.brand);
   const ua = navigator.userAgent;
-  if (navigator.brave || brands.some((b) => /brave/i.test(b))) return "brave";
-  if (brands.some((b) => /opera/i.test(b)) || /\bOPR\//.test(ua)) return "opera";
-  if (brands.some((b) => /edge/i.test(b)) || /\bEdg\//.test(ua)) return "edge";
-  if (brands.includes("Google Chrome")) return "chrome";
-  if (brands.includes("Chromium")) return "chromium";
-  return "chrome";
+  if (navigator.brave) return "brave";
+  if (/\bOPR\//.test(ua)) return "opera";
+  if (/\bEdg\//.test(ua)) return "edge";
+  const own = brands.find((b) => b !== "Chromium" && !/not.*brand/i.test(b));
+  return browserKey(own ?? "") || "chromium";
 })();
 
 // ── Bridge ────────────────────────────────────────────────────────────────

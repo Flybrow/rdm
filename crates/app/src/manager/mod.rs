@@ -436,12 +436,16 @@ pub struct Manager {
     /// as reinstalled by hand.
     uninstalls: Mutex<BTreeMap<String, u64>>,
     installs: Mutex<HashMap<Browser, Install>>,
+    /// Browsers the user added by their executable (portable ones, or any Windows does not list).
+    custom_browsers: Mutex<Vec<PathBuf>>,
 }
 
 const BROWSERS_FILE: &str = "browsers.json";
 /// Extensions to remove (see `Manager::remove_extension`).
 const UNINSTALLS_FILE: &str = "uninstalls.json";
 const UNINSTALL_TTL_SECS: u64 = 24 * 3600;
+/// Browsers added by hand (see `Manager::add_browser`).
+const CUSTOM_BROWSERS_FILE: &str = "custom_browsers.json";
 /// Messages kept for the window while it is closed.
 const MAX_NOTICES: usize = 20;
 
@@ -575,6 +579,12 @@ impl Manager {
                     .unwrap_or_default(),
             ),
             installs: Mutex::default(),
+            custom_browsers: Mutex::new(
+                fs::read(crate::settings::config_file(CUSTOM_BROWSERS_FILE))
+                    .ok()
+                    .and_then(|b| serde_json::from_slice(&b).ok())
+                    .unwrap_or_default(),
+            ),
         });
         this.spawn_ticker();
         this.spawn_update_checks();
@@ -769,6 +779,43 @@ impl Manager {
         self.repaint();
     }
 
+    /// Every browser the extension was heard from, with when (Unix time).
+    pub fn browsers_seen(&self) -> Vec<(Browser, u64)> {
+        lock(&self.browsers).iter().filter_map(|(key, &t)| Some((Browser::from_key(key)?, t))).collect()
+    }
+
+    /// The browsers of this computer (Windows' list, the well-known ones, those added by hand),
+    /// then those the extension was heard from that are not among them (a portable browser).
+    pub fn browsers(&self) -> Vec<Browser> {
+        let mut list = extension::installed(&lock(&self.custom_browsers));
+        for (b, _) in self.browsers_seen() {
+            if !list.contains(&b) {
+                list.push(b);
+            }
+        }
+        list
+    }
+
+    /// "Add a browser…": the browser at `exe`, remembered. `None`: not a browser the extension
+    /// can run in (neither Chromium- nor Firefox-based).
+    pub fn add_browser(&self, exe: PathBuf) -> Option<Browser> {
+        let browser = Browser::at(&exe)?;
+        let list = {
+            let mut list = lock(&self.custom_browsers);
+            if !list.contains(&exe) {
+                list.push(exe);
+            }
+            list.clone()
+        };
+        save_json(CUSTOM_BROWSERS_FILE, &list);
+        Some(browser)
+    }
+
+    /// Whether an installation is being prepared (the window shows a spinner).
+    pub fn installing(&self) -> bool {
+        lock(&self.installs).values().any(|i| matches!(i, Install::Working))
+    }
+
     pub fn install_state(&self, browser: Browser) -> Option<Install> {
         lock(&self.installs).get(&browser).cloned()
     }
@@ -814,7 +861,7 @@ impl Manager {
                 return Ok(done);
             }
             // Waterfox can install the unsigned package for good (signature check off: see the steps).
-            if browser == Browser::Waterfox
+            if browser.key() == "waterfox"
                 && let Some(xpi) = &done.xpi
             {
                 done.launched = open(&xpi.to_string_lossy());

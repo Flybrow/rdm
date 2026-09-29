@@ -30,7 +30,8 @@ pub(super) struct Browsers {
 
 impl App<'_> {
     pub(super) fn open_browsers(&mut self) {
-        let mut found: Vec<_> = Browser::ALL.into_iter().map(|b| (b, b.find())).collect();
+        // Every Chromium- or Firefox-based browser of the computer, known to RDM or not.
+        let mut found: Vec<_> = self.manager.browsers().into_iter().map(|b| (b, b.find())).collect();
         // Browsers found here or already connected first (a portable browser is not "found").
         found.sort_by_key(|(b, exe)| exe.is_none() && self.manager.browser_last_seen(*b).is_none());
         self.browsers = Some(Browsers { found, open: None });
@@ -40,6 +41,7 @@ impl App<'_> {
         let Some(mut state) = self.browsers.take() else { return };
         let p = Palette::from_ctx(ctx);
         let mut copied = None;
+        let mut add = false;
         let modal = Modal::new(Id::new("browsers")).frame(dialog_frame(&p)).backdrop_color(backdrop(&p)).show(ctx, |ui| {
             ui.set_width(660.0);
             let close = dialog_header(
@@ -59,13 +61,18 @@ impl App<'_> {
                     self.browser_row(ui, &p, *browser, exe.as_deref(), &mut state.open, &mut copied);
                     ui.add_space(10.0);
                 }
+                // A browser Windows does not list (a portable one): picked by its executable, as in IDM.
+                if ghost_button(ui, icon::PLUS, tr!("Ajouter un navigateur…", "Add a browser…")).clicked() {
+                    add = true;
+                }
+                ui.add_space(8.0);
                 widgets::icon_text(
                     ui,
                     icon::INFO,
                     p.faint,
                     &trf!(
-                        "Extension {} · une seule pour Chrome, Brave, Opera, Edge et Chromium ; une pour Firefox et Waterfox.",
-                        "Extension {} · one for Chrome, Brave, Opera, Edge and Chromium; one for Firefox and Waterfox.",
+                        "Extension {} · une pour tous les navigateurs basés sur Chromium (Chrome, Edge, Brave, Opera, Vivaldi…), une pour tous ceux basés sur Firefox (Waterfox, LibreWolf, Floorp, Zen…).",
+                        "Extension {} · one for every Chromium-based browser (Chrome, Edge, Brave, Opera, Vivaldi…), one for every Firefox-based browser (Waterfox, LibreWolf, Floorp, Zen…).",
                         extension::version()
                     ),
                     p.faint,
@@ -78,11 +85,37 @@ impl App<'_> {
             ctx.copy_text(text);
             self.toasts.info(icon::COPY, tr!("Chemin copié : collez-le avec Ctrl+V", "Path copied: paste it with Ctrl+V"));
         }
-        if Browser::ALL.into_iter().any(|b| matches!(self.manager.install_state(b), Some(Install::Working))) {
+        if add {
+            self.add_browser(&mut state);
+        }
+        if self.manager.installing() {
             self.animating = true; // spinner
         }
         if !(modal.inner || modal.should_close()) {
             self.browsers = Some(state);
+        }
+    }
+
+    /// "Add a browser…": its executable, picked by the user; then listed like the others.
+    fn add_browser(&mut self, state: &mut Browsers) {
+        let mut dialog = rfd::FileDialog::new().set_title(tr!("Choisir le programme du navigateur", "Choose the browser's program"));
+        if cfg!(windows) {
+            dialog = dialog.add_filter(tr!("Programmes", "Programs"), &["exe"]);
+        }
+        let Some(exe) = dialog.pick_file() else { return };
+        match self.manager.add_browser(exe.clone()) {
+            Some(browser) => {
+                state.found.retain(|(b, _)| *b != browser);
+                state.found.insert(0, (browser, Some(exe)));
+                state.open = None;
+            }
+            None => self.toasts.warn(
+                icon::WARNING,
+                tr!(
+                    "Ce programme n'est pas un navigateur basé sur Chromium ou Firefox.",
+                    "This program is not a Chromium- or Firefox-based browser."
+                ),
+            ),
         }
     }
 
@@ -114,7 +147,7 @@ impl App<'_> {
                     let (tile, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
                     let hue = if exe.is_some() || seen.is_some() { p.accent } else { p.faint };
                     ui.painter().add(widgets::gradient(ui, tile, 12, p.tint(hue, 0.30), p.tint(hue, 0.10), vec2(0.7, 0.7)));
-                    let glyph = if matches!(browser, Browser::Chrome | Browser::Chromium) { icon::GOOGLE_CHROME_LOGO } else { icon::BROWSER };
+                    let glyph = if matches!(browser.key(), "chrome" | "chromium") { icon::GOOGLE_CHROME_LOGO } else { icon::BROWSER };
                     ui.painter().text(tile.center(), eframe::egui::Align2::CENTER_CENTER, glyph, theme::regular(21.0), hue);
                     ui.add_space(4.0);
                     ui.vertical(|ui| {
@@ -223,7 +256,7 @@ fn steps(ui: &mut Ui, p: &Palette, browser: Browser, exe: Option<&Path>, done: &
             reopen = (package.to_string_lossy().into_owned(), reopen_package);
         }
         // Waterfox installs an unsigned package for good (its signature check is off by default).
-        Flavour::Firefox if browser == Browser::Waterfox && done.xpi.is_some() => {
+        Flavour::Firefox if browser.key() == "waterfox" && done.xpi.is_some() => {
             let xpi = done.xpi.as_deref().expect("checked");
             let first = if done.launched {
                 tr!("Waterfox propose d'ajouter « RDM » : cliquez sur « Ajouter ».", "Waterfox offers to add \"RDM\": click \"Add\".")
@@ -383,7 +416,8 @@ pub(super) fn card(ui: &mut Ui, p: &Palette, (connected, installed): (Vec<Browse
 /// runs), and browsers heard from at all, for the sidebar card.
 pub(super) fn connected(manager: &crate::manager::Manager) -> (Vec<Browser>, Vec<Browser>) {
     let now = unix_now();
-    let seen: Vec<(Browser, u64)> = Browser::ALL.into_iter().filter_map(|b| Some((b, manager.browser_last_seen(b)?))).collect();
+    let mut seen = manager.browsers_seen();
+    seen.sort_by_key(|(b, _)| b.name()); // a stable order in the sidebar
     let live = seen.iter().filter(|(_, t)| now.saturating_sub(*t) < LIVE_SECS).map(|(b, _)| *b).collect();
     (live, seen.into_iter().map(|(b, _)| b).collect())
 }
