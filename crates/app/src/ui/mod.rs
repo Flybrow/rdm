@@ -321,7 +321,7 @@ impl Filter {
             Self::Queued => tr!("En attente", "Waiting").into(),
             Self::Done => tr!("Terminés", "Completed").into(),
             Self::Failed => tr!("Échecs", "Failed").into(),
-            Self::Kind(c) => c.label(crate::i18n::english()).into(),
+            Self::Kind(c) => crate::i18n::category(c).into(),
             Self::Queue(q) => queue_name(settings, q),
         }
     }
@@ -333,7 +333,7 @@ fn queue_name(settings: &Settings, queue: u32) -> String {
         Some(q) if !q.name.is_empty() => q.name.clone(),
         Some(q) => {
             let id = q.id;
-            trf!("File {id}", "Queue {id}")
+            trf!("File {id}", "Queue {id}", id = id)
         }
         None => tr!("File principale", "Main queue").into(),
     }
@@ -457,6 +457,8 @@ struct App<'a> {
     animating: bool,
     /// Frames still to draw right away after a dialog or menu closed.
     settle_frames: u8,
+    /// The language the fonts were installed for (see `theme::install_fonts`).
+    fonts_language: crate::i18n::Language,
     /// Rendering without vsync: frames are spaced out by `pace`.
     paced: bool,
     last_frame: Option<Instant>,
@@ -493,6 +495,7 @@ impl<'a> App<'a> {
             toasts: Toasts::default(),
             animating: false,
             settle_frames: 0,
+            fonts_language: crate::i18n::active(),
             paced,
             last_frame: None,
         };
@@ -538,7 +541,7 @@ impl<'a> App<'a> {
         match n {
             0 => self.toasts.warn(icon::LINK_BREAK, tr!("Aucun lien http(s) à télécharger", "No http(s) link to download")),
             1 => self.toasts.info(icon::DOWNLOAD_SIMPLE, tr!("Téléchargement ajouté", "Download added")),
-            n => self.toasts.info(icon::DOWNLOAD_SIMPLE, &trf!("{n} téléchargements ajoutés", "{n} downloads added")),
+            n => self.toasts.info(icon::DOWNLOAD_SIMPLE, &trf!("{n} téléchargements ajoutés", "{n} downloads added", n = n)),
         }
         n
     }
@@ -577,7 +580,7 @@ impl<'a> App<'a> {
                 Action::Copy(text, what) => {
                     self.manager.copied_by_rdm(&text);
                     ctx.copy_text(text);
-                    self.toasts.info(icon::COPY, &trf!("{what} copié", "{what} copied"));
+                    self.toasts.info(icon::COPY, &trf!("{what} copié", "{what} copied", what = what));
                 }
                 Action::Edit(id, field) => self.edit = edit::Editor::open(&self.manager, id, field),
                 Action::SetInsecure(id, insecure) => {
@@ -644,6 +647,10 @@ impl<'a> App<'a> {
 
 impl eframe::App for App<'_> {
     fn update(&mut self, ctx: &Context, _: &mut eframe::Frame) {
+        if self.fonts_language != crate::i18n::active() {
+            self.fonts_language = crate::i18n::active();
+            theme::install_fonts(ctx);
+        }
         self.shortcuts(ctx);
         let stats = self.manager.stats();
         let mut actions = Vec::new();

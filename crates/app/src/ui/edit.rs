@@ -156,10 +156,10 @@ impl App<'_> {
         let first = offer.urls.first().map(file_name).unwrap_or_default();
         let more = offer.urls.len().saturating_sub(1);
         let text = if more == 0 {
-            trf!("Lien copié : {first}", "Link copied: {first}")
+            trf!("Lien copié : {first}", "Link copied: {first}", first = first)
         } else {
             let more = crate::i18n::count(more as u64, ("autre", "autres"), ("more", "more"));
-            trf!("Liens copiés : {first} et {more}", "Links copied: {first} and {more}")
+            trf!("Liens copiés : {first} et {more}", "Links copied: {first} and {more}", first = first, more = more)
         };
         let mut answer = None;
         Frame::new()

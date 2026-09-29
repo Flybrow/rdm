@@ -2,6 +2,8 @@
 
 use std::time::{Duration, Instant};
 
+use crate::i18n::Language;
+
 use tray_icon::{
     Icon, MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent,
     menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
@@ -35,7 +37,7 @@ pub struct Tray {
     icon: TrayIcon,
     items: Vec<MenuItem>,
     /// The language the menu is written in.
-    english: bool,
+    language: Language,
     tip: String,
     tip_at: Option<Instant>,
 }
@@ -74,15 +76,15 @@ pub fn create(rgba: Vec<u8>, size: u32, on_command: impl Fn(Command) + Send + Sy
         .with_icon(Icon::from_rgba(rgba, size, size).ok()?)
         .build()
         .ok()?;
-    Some(Tray { icon, items, english: crate::i18n::english(), tip: IDLE_TIP.to_owned(), tip_at: None })
+    Some(Tray { icon, items, language: crate::i18n::active(), tip: IDLE_TIP.to_owned(), tip_at: None })
 }
 
 impl Tray {
     /// The interface language changed: the menu follows.
     pub fn relabel(&mut self) {
-        let english = crate::i18n::english();
-        if english != self.english {
-            self.english = english;
+        let language = crate::i18n::active();
+        if language != self.language {
+            self.language = language;
             for (item, (_, command)) in self.items.iter().zip(ITEMS) {
                 item.set_text(label(command));
             }

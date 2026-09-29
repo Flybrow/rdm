@@ -125,7 +125,8 @@ async fn single_instance(url: Option<&Url>) -> Option<tokio::net::TcpListener> {
         "RDM ne peut pas démarrer : le port local 127.0.0.1:{port} est occupé par un programme qui ne répond pas \
          (un RDM bloqué, ou celui d'une autre session ?). Fermez-le (Gestionnaire des tâches), puis relancez RDM.",
         "RDM cannot start: the local port 127.0.0.1:{port} is taken by a program that does not answer \
-         (a stuck RDM, or another session's?). Close it (Task Manager), then start RDM again."
+         (a stuck RDM, or another session's?). Close it (Task Manager), then start RDM again.",
+        port = port
     ));
     None
 }

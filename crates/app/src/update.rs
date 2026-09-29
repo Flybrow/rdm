@@ -289,7 +289,7 @@ async fn latest(client: &reqwest::Client) -> Result<Option<ApiRelease>, String> 
     }
     if !res.status().is_success() {
         let status = res.status().as_u16();
-        return Err(crate::trf!("GitHub a répondu {status}", "GitHub answered {status}"));
+        return Err(crate::trf!("GitHub a répondu {status}", "GitHub answered {status}", status = status));
     }
     let body = res.bytes().await.map_err(|_| unreachable())?;
     let r: ApiRelease = serde_json::from_slice(&body).map_err(|_| tr!("réponse inattendue de GitHub", "unexpected answer from GitHub").to_owned())?;
@@ -437,7 +437,7 @@ async fn fetch(client: &reqwest::Client, version: &str, package: &Package, path:
     let res = client.get(&package.url).send().await.map_err(|_| Retry(tr!("GitHub est injoignable", "GitHub cannot be reached").into()))?;
     if !res.status().is_success() {
         let status = res.status().as_u16();
-        let reason = crate::trf!("téléchargement refusé par GitHub ({status})", "download refused by GitHub ({status})");
+        let reason = crate::trf!("téléchargement refusé par GitHub ({status})", "download refused by GitHub ({status})", status = status);
         return Err(if res.status().is_server_error() || status == 429 { Retry(reason) } else { Fatal(reason) });
     }
     let too_big = || Fatal(tr!("paquet anormalement gros", "abnormally large package").into());
@@ -446,7 +446,7 @@ async fn fetch(client: &reqwest::Client, version: &str, package: &Package, path:
         return Err(too_big());
     }
     let tmp = crate::settings::with_suffix(path, ".tmp");
-    let io = |e: std::io::Error| Fatal(crate::trf!("écriture impossible : {e}", "cannot write: {e}"));
+    let io = |e: std::io::Error| Fatal(crate::trf!("écriture impossible : {e}", "cannot write: {e}", e = e));
     let mut file = tokio::fs::File::create(&tmp).await.map_err(io)?;
     // Streamed to disk: only the first bytes (the format) and the running hash stay in memory.
     let (mut stream, mut head, mut received, mut hash) = (res.bytes_stream(), Vec::with_capacity(16), 0u64, Sha256::new());
@@ -643,7 +643,7 @@ mod linux {
         match status.code() {
             Some(0) => Ok(()),
             Some(126 | 127) => Err(tr!("mot de passe refusé ou demande fermée", "password refused or prompt closed").into()),
-            Some(c) => Err(trf!("le gestionnaire de paquets a échoué (code {c})", "the package manager failed (code {c})")),
+            Some(c) => Err(trf!("le gestionnaire de paquets a échoué (code {c})", "the package manager failed (code {c})", c = c)),
             None => Err(tr!("installation interrompue", "installation interrupted").into()),
         }
     }
@@ -730,13 +730,15 @@ mod imp {
                 Some(1602) => tr!("installation annulée", "installation cancelled").to_owned(),
                 Some(1603) => tr!("erreur de Windows Installer (1603)", "Windows Installer error (1603)").to_owned(),
                 Some(1618) => tr!("une autre installation est en cours (1618)", "another installation is in progress (1618)").to_owned(),
-                Some(c) => trf!("code {c}", "code {c}"),
+                Some(c) => trf!("code {c}", "code {c}", c = c),
                 None => tr!("Windows Installer n'a pas pu être lancé", "Windows Installer could not be started").to_owned(),
             };
             let log = log.display();
             let text = trf!(
                 "La mise à jour de RDM n'a pas pu s'installer : {reason}.\n\nOuvrir l'installateur pour réessayer ? (Sinon, RDM redémarre dans sa version actuelle.)\n\nJournal : {log}",
-                "RDM's update could not be installed: {reason}.\n\nOpen the installer to try again? (Otherwise RDM restarts in its current version.)\n\nLog: {log}"
+                "RDM's update could not be installed: {reason}.\n\nOpen the installer to try again? (Otherwise RDM restarts in its current version.)\n\nLog: {log}",
+                log = log,
+                reason = reason
             );
             if ask(&text) {
                 msiexec(&["/i".as_ref(), msi.as_os_str()]);

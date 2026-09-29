@@ -53,10 +53,10 @@ pub fn checksum_mismatch(file_name: &str) {
 pub fn virustotal(file_name: &str, verdict: Result<&Report, String>) {
     let (flagged, engines) = verdict.as_ref().map_or((0, 0), |r| (r.flagged(), r.engines()));
     let summary = match &verdict {
-        Ok(r) if r.flagged() == 0 => crate::trf!("VirusTotal : aucune menace ({flagged}/{engines})", "VirusTotal: no threat ({flagged}/{engines})"),
+        Ok(r) if r.flagged() == 0 => crate::trf!("VirusTotal : aucune menace ({flagged}/{engines})", "VirusTotal: no threat ({flagged}/{engines})", engines = engines, flagged = flagged),
         Ok(_) => {
             let flagged = crate::i18n::count(flagged, ("détection", "détections"), ("detection", "detections"));
-            crate::trf!("VirusTotal : {flagged} sur {engines}", "VirusTotal: {flagged} out of {engines}")
+            crate::trf!("VirusTotal : {flagged} sur {engines}", "VirusTotal: {flagged} out of {engines}", engines = engines, flagged = flagged)
         }
         Err(_) => crate::tr!("VirusTotal : analyse impossible", "VirusTotal: analysis failed").to_owned(),
     };

@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use domain::{Category, MAX_CONNECTIONS};
 use eframe::egui::{
-    Align, Align2, Color32, Context, DragValue, Frame, Id, Label, Layout, Margin, Modal, Rect, RichText, ScrollArea,
+    Align, Align2, Color32, ComboBox, Context, DragValue, Frame, Id, Label, Layout, Margin, Modal, Rect, RichText, ScrollArea,
     Sense, Slider, Stroke, StrokeKind, TextEdit, Ui, Vec2, pos2, vec2,
 };
 use egui_phosphor::regular as icon;
@@ -80,6 +80,23 @@ fn section(ui: &mut Ui, p: &Palette, glyph: &str, title: &str, add: impl FnOnce(
 /// Grey explanatory text under a setting.
 fn note(ui: &mut Ui, p: &Palette, text: &str) {
     ui.add(Label::new(RichText::new(text).font(theme::regular(12.0)).color(p.muted)).wrap());
+}
+
+/// The interface language: the system's (detected) or one picked in a drop-down list, each named in
+/// its own language.
+fn language_menu(ui: &mut Ui, language: &mut Language) {
+    let name = |l: Language| match l {
+        Language::Auto => trf!("Automatique · {name}", "Automatic · {name}", name = Language::system().native_name()),
+        other => other.native_name().to_owned(),
+    };
+    ComboBox::from_id_salt("language")
+        .width(ui.available_width().min(320.0))
+        .selected_text(name(*language))
+        .show_ui(ui, |ui| {
+            for option in std::iter::once(Language::Auto).chain(Language::ALL) {
+                ui.selectable_value(language, option, name(option));
+            }
+        });
 }
 
 /// A label on the left of a row of controls.
@@ -262,7 +279,7 @@ impl App<'_> {
             ui.set_width(500.0);
             let subtitle = if waiting > 1 {
                 let more = crate::i18n::count(waiting as u64 - 1, ("autre en attente", "autres en attente"), ("more waiting", "more waiting"));
-                trf!("Envoyé par le navigateur · {more}", "Sent by the browser · {more}")
+                trf!("Envoyé par le navigateur · {more}", "Sent by the browser · {more}", more = more)
             } else {
                 tr!("Envoyé par le navigateur", "Sent by the browser").to_owned()
             };
@@ -367,11 +384,7 @@ fn settings_form(
 ) -> Option<FormAction> {
     let mut action = None;
     section(ui, p, icon::TRANSLATE, tr!("Langue et apparence", "Language and appearance"), |ui| {
-        segmented(
-            ui,
-            &mut s.language,
-            &[(Language::Auto, icon::GLOBE, tr!("Système", "System")), (Language::English, icon::TRANSLATE, "English"), (Language::French, icon::TRANSLATE, "Français")],
-        );
+        language_menu(ui, &mut s.language);
         ui.add_space(6.0);
         segmented(
             ui,
@@ -395,10 +408,9 @@ fn settings_form(
             tr!("Vidéos, Musique, Compressés… dans le dossier principal", "Videos, Music, Archives… inside the main folder"),
         );
         ui.add_space(4.0);
-        let english = crate::i18n::english();
         for category in Category::ALL {
             let shown = s.category_dir(category);
-            match folder_row(ui, p, category_icon(category), category.label(english), &shown, s.category_dirs.contains_key(&category)) {
+            match folder_row(ui, p, category_icon(category), crate::i18n::category(category), &shown, s.category_dirs.contains_key(&category)) {
                 Some(Some(dir)) => {
                     s.category_dirs.insert(category, dir);
                 }
@@ -479,7 +491,7 @@ fn settings_form(
         if s.queues.len() < MAX_QUEUES && ghost_button(ui, icon::PLUS, tr!("Nouvelle file", "New queue")).clicked() {
             let id = (1..).find(|id| !s.queues.iter().any(|q| q.id == *id)).unwrap_or(1);
             let n = s.queues.len() + 1;
-            s.queues.push(Queue { id, name: trf!("File {n}", "Queue {n}"), max_parallel: 1 });
+            s.queues.push(Queue { id, name: trf!("File {n}", "Queue {n}", n = n), max_parallel: 1 });
         }
     });
 
@@ -696,16 +708,16 @@ fn settings_form(
             }
             let version = env!("CARGO_PKG_VERSION");
             let (glyph, text, color) = match update_state {
-                update::State::Idle => (icon::INFO, trf!("Version installée : {version}", "Installed version: {version}"), p.muted),
+                update::State::Idle => (icon::INFO, trf!("Version installée : {version}", "Installed version: {version}", version = version), p.muted),
                 update::State::Checking => (icon::CIRCLE_NOTCH, tr!("Recherche en cours…", "Checking…").to_owned(), p.accent),
-                update::State::UpToDate => (icon::CHECK_CIRCLE, trf!("RDM est à jour ({version})", "RDM is up to date ({version})"), p.success),
+                update::State::UpToDate => (icon::CHECK_CIRCLE, trf!("RDM est à jour ({version})", "RDM is up to date ({version})", version = version), p.success),
                 update::State::Available(r) => (icon::ROCKET_LAUNCH, trf!("Version {} disponible", "Version {} available", r.version), p.accent),
                 update::State::Downloading(f) => {
                     let percent = (f * 100.0) as u32;
-                    (icon::DOWNLOAD_SIMPLE, trf!("Téléchargement {percent} %", "Downloading {percent}%"), p.accent)
+                    (icon::DOWNLOAD_SIMPLE, trf!("Téléchargement {percent} %", "Downloading {percent}%", percent = percent), p.accent)
                 }
                 update::State::Installing => (icon::ROCKET_LAUNCH, tr!("Installation : RDM redémarre tout seul", "Installing: RDM restarts by itself").to_owned(), p.accent),
-                update::State::InstallFailed(r, reason) => (icon::WARNING, trf!("Version {} : {reason}", "Version {}: {reason}", r.version), p.danger),
+                update::State::InstallFailed(r, reason) => (icon::WARNING, trf!("Version {} : {reason}", "Version {}: {reason}", r.version, reason = reason), p.danger),
                 update::State::Failed(reason) => (icon::WARNING, reason.clone(), p.danger),
             };
             ui.add(Label::new(RichText::new(format!("{glyph}  {text}")).font(theme::regular(13.0)).color(color)).wrap());
@@ -779,7 +791,7 @@ fn report_view(ui: &mut Ui, p: &Palette, name: &str, r: &Report, actions: &mut V
         (icon::SHIELD_CHECK, tr!("Aucune menace détectée", "No threat detected").to_owned())
     } else {
         let n = r.flagged();
-        (icon::SHIELD_WARNING, trf!("{n} antivirus signalent ce fichier", "{n} antivirus engines flag this file"))
+        (icon::SHIELD_WARNING, trf!("{n} antivirus signalent ce fichier", "{n} antivirus engines flag this file", n = n))
     };
     let close = dialog_header(ui, p, glyph, color, &title, name);
     ui.add_space(18.0);
@@ -829,7 +841,7 @@ fn report_view(ui: &mut Ui, p: &Palette, name: &str, r: &Report, actions: &mut V
                 ui,
                 icon::CHECK_CIRCLE,
                 p.success,
-                &trf!("Aucun des {n} antivirus n'a détecté de menace dans ce fichier.", "None of the {n} antivirus engines detected a threat in this file."),
+                &trf!("Aucun des {n} antivirus n'a détecté de menace dans ce fichier.", "None of the {n} antivirus engines detected a threat in this file.", n = n),
                 p.text,
                 13.5,
             );

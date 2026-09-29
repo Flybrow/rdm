@@ -214,7 +214,7 @@ fn markers(p: &Palette, settings: &Settings, e: &Entry) -> Vec<(&'static str, Co
     }
     if d.speed_limit_kib > 0 {
         let limit = speed(f64::from(d.speed_limit_kib) * 1024.0);
-        marks.push((icon::GAUGE, p.warning, trf!("Limité à {limit}", "Limited to {limit}")));
+        marks.push((icon::GAUGE, p.warning, trf!("Limité à {limit}", "Limited to {limit}", limit = limit)));
     }
     if d.insecure {
         marks.push((
@@ -236,7 +236,7 @@ fn detail_line(e: &Entry, status: &Status, recording: bool, done: u64, total: u6
     let text = match status {
         Status::Running if recording => {
             let estimate = if total > 0 { format!(" / ~{}", bytes(total)) } else { String::new() };
-            trf!("{got}{estimate} · {rate}{eta} · dans le navigateur", "{got}{estimate} · {rate}{eta} · in the browser")
+            trf!("{got}{estimate} · {rate}{eta} · dans le navigateur", "{got}{estimate} · {rate}{eta} · in the browser", estimate = estimate, eta = eta, got = got, rate = rate)
         }
         Status::Running => {
             let conns = crate::i18n::count(conns as u64, ("connexion", "connexions"), ("connection", "connections"));
@@ -246,12 +246,12 @@ fn detail_line(e: &Entry, status: &Status, recording: bool, done: u64, total: u6
             let place = e.download.target.parent().map_or(String::new(), |d| d.display().to_string());
             let size = bytes(total.max(done));
             match &e.verify {
-                Verify::Ok => return (trf!("{size} · ✓ empreinte vérifiée · {place}", "{size} · ✓ checksum verified · {place}"), p.success),
+                Verify::Ok => return (trf!("{size} · ✓ empreinte vérifiée · {place}", "{size} · ✓ checksum verified · {place}", place = place, size = size), p.success),
                 Verify::Mismatch(_) => {
-                    return (trf!("✗ empreinte différente : fichier corrompu ou pas le bon · {place}", "✗ checksum mismatch: corrupted or not the expected file · {place}"), p.danger);
+                    return (trf!("✗ empreinte différente : fichier corrompu ou pas le bon · {place}", "✗ checksum mismatch: corrupted or not the expected file · {place}", place = place), p.danger);
                 }
-                Verify::Running => trf!("{size} · vérification de l'empreinte…", "{size} · verifying the checksum…"),
-                Verify::Failed(reason) => return (trf!("{size} · empreinte non vérifiée : {reason}", "{size} · checksum not verified: {reason}"), p.warning),
+                Verify::Running => trf!("{size} · vérification de l'empreinte…", "{size} · verifying the checksum…", size = size),
+                Verify::Failed(reason) => return (trf!("{size} · empreinte non vérifiée : {reason}", "{size} · checksum not verified: {reason}", reason = reason, size = size), p.warning),
                 Verify::None => format!("{size} · {place}"),
             }
         }
@@ -261,14 +261,14 @@ fn detail_line(e: &Entry, status: &Status, recording: bool, done: u64, total: u6
             let left = retry.at.saturating_duration_since(std::time::Instant::now()).as_secs();
             let reason = &retry.reason;
             let when = if left == 0 { tr!("maintenant", "now").to_owned() } else { trf!("dans {}", "in {}", duration(left)) };
-            return (trf!("{reason} · nouvel essai {when}", "{reason} · retrying {when}"), p.warning);
+            return (trf!("{reason} · nouvel essai {when}", "{reason} · retrying {when}", reason = reason, when = when), p.warning);
         }
         Status::Queued if e.resolving => tr!("analyse du lien auprès du serveur…", "asking the server about the link…").to_owned(),
-        Status::Queued => trf!("{got} / {size} · démarre dès qu'une place se libère", "{got} / {size} · starts as soon as a place is free"),
+        Status::Queued => trf!("{got} / {size} · démarre dès qu'une place se libère", "{got} / {size} · starts as soon as a place is free", got = got, size = size),
         Status::Failed(reason) if recording => {
-            return (trf!("{reason} — relancez l'enregistrement depuis la page", "{reason} — start the recording again from the page"), p.danger);
+            return (trf!("{reason} — relancez l'enregistrement depuis la page", "{reason} — start the recording again from the page", reason = reason), p.danger);
         }
-        Status::Failed(reason) => return (trf!("{reason} — ▶ pour réessayer", "{reason} — ▶ to retry"), p.danger),
+        Status::Failed(reason) => return (trf!("{reason} — ▶ pour réessayer", "{reason} — ▶ to retry", reason = reason), p.danger),
     };
     (text, p.muted)
 }
@@ -292,7 +292,7 @@ fn scan_badge(ui: &mut Ui, p: &Palette, e: &Entry, right: f32, y: f32, actions: 
                 format!("{n}/{}", r.engines()),
                 if r.malicious > 0 { p.danger } else { p.warning },
                 Some(Action::ShowReport(e.download.id)),
-                trf!("VirusTotal : {n} antivirus signalent ce fichier — voir l'analyse", "VirusTotal: {n} antivirus flag this file — see the report"),
+                trf!("VirusTotal : {n} antivirus signalent ce fichier — voir l'analyse", "VirusTotal: {n} antivirus flag this file — see the report", n = n),
             )
         }
         Scan::Running(stage) => ("", stage_text(*stage), p.accent, None, tr!("Analyse VirusTotal en cours", "VirusTotal analysis in progress").to_owned()),
@@ -301,7 +301,7 @@ fn scan_badge(ui: &mut Ui, p: &Palette, e: &Entry, right: f32, y: f32, actions: 
             tr!("Réessayer", "Retry").to_owned(),
             p.danger,
             Some(Action::Scan(e.download.id)),
-            trf!("Analyse impossible : {reason}. Cliquez pour réessayer.", "Analysis failed: {reason}. Click to retry."),
+            trf!("Analyse impossible : {reason}. Cliquez pour réessayer.", "Analysis failed: {reason}. Click to retry.", reason = reason),
         ),
     };
     let running = scan_running(e);
@@ -334,7 +334,7 @@ fn stage_text(stage: Stage) -> String {
         Stage::LookingUp => tr!("VirusTotal · recherche…", "VirusTotal · looking up…").into(),
         Stage::Uploading(f) => {
             let pct = (f * 100.0).floor() as u32;
-            trf!("VirusTotal · envoi {pct} %", "VirusTotal · uploading {pct} %")
+            trf!("VirusTotal · envoi {pct} %", "VirusTotal · uploading {pct} %", pct = pct)
         }
         Stage::Analyzing => tr!("VirusTotal · analyse…", "VirusTotal · analyzing…").into(),
     }
@@ -365,7 +365,7 @@ fn context_menu(ui: &mut Ui, p: &Palette, settings: &Settings, e: &Entry, action
         match &e.sha256 {
             Some(hash) => {
                 let short = hash.get(..10).unwrap_or(hash);
-                if item(ui, icon::FINGERPRINT, &trf!("Copier le SHA-256 ({short}…)", "Copy the SHA-256 ({short}…)"), p.text) {
+                if item(ui, icon::FINGERPRINT, &trf!("Copier le SHA-256 ({short}…)", "Copy the SHA-256 ({short}…)", short = short), p.text) {
                     actions.push(Action::Copy(hash.clone(), "SHA-256"));
                 }
             }

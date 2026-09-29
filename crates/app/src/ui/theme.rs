@@ -115,9 +115,18 @@ pub fn bold(size: f32) -> FontId {
     FontId::new(size, BOLD.clone())
 }
 
-/// Inter (regular, semibold, bold) with Phosphor icons in every family, then egui's own fonts as
-/// fallbacks for scripts Inter's Latin subset lacks (file names can be anything).
+/// Styles for both themes, once.
 pub fn install(ctx: &Context) {
+    install_fonts(ctx);
+    ctx.style_mut_of(Theme::Dark, |s| apply(s, &DARK));
+    ctx.style_mut_of(Theme::Light, |s| apply(s, &LIGHT));
+}
+
+/// Inter (regular, semibold, bold; Latin, Greek, Cyrillic, Vietnamese) with Phosphor icons in every
+/// family, then egui's own fonts and Noto Sans CJK as fallbacks for other scripts (file names can be
+/// anything). The CJK font draws the characters shared by Chinese, Japanese and Korean the way the
+/// interface language does: call again when it changes.
+pub fn install_fonts(ctx: &Context) {
     let mut fonts = FontDefinitions::default();
     let fallbacks = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     let font = |bytes: &'static [u8]| Arc::new(FontData::from_static(bytes));
@@ -129,9 +138,12 @@ pub fn install(ctx: &Context) {
     fonts.font_data.insert("inter-semibold".into(), font(include_bytes!("../../assets/fonts/Inter-600.ttf")));
     fonts.font_data.insert("inter-bold".into(), font(include_bytes!("../../assets/fonts/Inter-700.ttf")));
     fonts.font_data.insert("phosphor".into(), icons(egui_phosphor::Variant::Regular.font_bytes()));
+    let mut cjk = FontData::from_static(include_bytes!("../../assets/fonts/NotoSansCJK-Regular.ttc"));
+    cjk.index = crate::i18n::active().cjk_font_index();
+    fonts.font_data.insert("cjk".into(), Arc::new(cjk));
 
     let family = |main: &str| {
-        [main.to_owned(), "phosphor".to_owned()].into_iter().chain(fallbacks.iter().cloned()).collect::<Vec<_>>()
+        [main.to_owned(), "phosphor".to_owned()].into_iter().chain(fallbacks.iter().cloned()).chain(["cjk".to_owned()]).collect::<Vec<_>>()
     };
     fonts.families.insert(FontFamily::Proportional, family("inter"));
     fonts.families.insert(SEMIBOLD.clone(), family("inter-semibold"));
@@ -140,8 +152,6 @@ pub fn install(ctx: &Context) {
         mono.push("phosphor".into());
     }
     ctx.set_fonts(fonts);
-    ctx.style_mut_of(Theme::Dark, |s| apply(s, &DARK));
-    ctx.style_mut_of(Theme::Light, |s| apply(s, &LIGHT));
 }
 
 fn apply(s: &mut Style, p: &Palette) {
@@ -210,4 +220,39 @@ fn apply(s: &mut Style, p: &Palette) {
     w.hovered.bg_stroke = Stroke::new(HAIRLINE, p.accent.gamma_multiply(0.7));
     w.active.bg_stroke = Stroke::new(HAIRLINE, p.accent);
     w.hovered.weak_bg_fill = if p.dark { rgb(0x202A45) } else { rgb(0xEBEFF9) };
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui::{Context, FontFamily, FontId, RawInput};
+
+    use super::*;
+    use crate::i18n::{self, Language};
+
+    /// Every letter of every language can be drawn, in each weight, by the fonts installed for it
+    /// (symbols such as ✓ or ✗ come from the icon fonts, when they have them).
+    #[test]
+    fn fonts_cover_every_language() {
+        let _one_at_a_time = i18n::TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ctx = Context::default();
+        for language in Language::ALL {
+            i18n::set(language);
+            install_fonts(&ctx);
+            // The fonts change at the start of the next frame.
+            let _ = ctx.run(RawInput::default(), |_| {});
+            let families = [FontFamily::Proportional, SEMIBOLD.clone(), BOLD.clone()];
+            ctx.fonts(|fonts| {
+                let name = language.native_name();
+                let texts = language.table().values().copied().chain([name]);
+                for text in texts.flat_map(|t| t.split(['\n', '|'])) {
+                    for family in &families {
+                        let id = FontId::new(14.0, family.clone());
+                        let missing: Vec<char> = text.chars().filter(|c| c.is_alphanumeric() && !fonts.has_glyph(&id, *c)).collect();
+                        assert!(missing.is_empty(), "{language:?}, {family:?}: no glyph for {missing:?} in {text:?}");
+                    }
+                }
+            });
+        }
+        i18n::set(Language::French);
+    }
 }

@@ -740,7 +740,7 @@ impl Manager {
         let folder = tokio::task::spawn_blocking(move || extension::write(flavour))
             .await
             .map_err(blocking)?
-            .map_err(|e| trf!("impossible d'écrire l'extension : {e}", "cannot write the extension: {e}"))?;
+            .map_err(|e| trf!("impossible d'écrire l'extension : {e}", "cannot write the extension: {e}", e = e))?;
         let mut done = Installed { folder, launched: false, signed: false, xpi: None };
         let open = |target: &str| exe.as_deref().is_some_and(|exe| extension::launch(exe, target).is_ok());
         if flavour == Flavour::Firefox {
@@ -938,7 +938,7 @@ impl Manager {
                 None => {
                     entries.remove(i);
                     drop(entries);
-                    self.notice(false, &trf!("Déjà téléchargé, ignoré : {name}", "Already downloaded, skipped: {name}"));
+                    self.notice(false, &trf!("Déjà téléchargé, ignoré : {name}", "Already downloaded, skipped: {name}", name = name));
                     self.changed();
                     return;
                 }
@@ -1155,7 +1155,7 @@ impl Manager {
             if update::method() == update::Method::Msi {
                 match update::start_installation(&file) {
                     Ok(()) => this.request_quit(),
-                    Err(e) => fail(trf!("impossible de lancer l'installation : {e}", "cannot start the installation: {e}")),
+                    Err(e) => fail(trf!("impossible de lancer l'installation : {e}", "cannot start the installation: {e}", e = e)),
                 }
                 return;
             }
@@ -1291,7 +1291,7 @@ impl Manager {
         self.rt.spawn_blocking(move || {
             let result = match r.best_source() {
                 Some(ms) => engine::mux::merge(&r.part(ms, Track::Video), &r.part(ms, Track::Audio), &r.target)
-                    .map_err(|e| trf!("fusion audio/vidéo impossible : {e}", "cannot merge audio and video: {e}")),
+                    .map_err(|e| trf!("fusion audio/vidéo impossible : {e}", "cannot merge audio and video: {e}", e = e)),
                 None => Err(tr!("aucune donnée vidéo et audio reçue", "no video or audio data received").to_owned()),
             };
             for (ms, track) in r.parts.keys() {
@@ -1504,7 +1504,9 @@ impl Manager {
                 let (have, got) = (crate::ui::size_text(total), crate::ui::size_text(size.unwrap_or(0)));
                 this.notice(true, &trf!(
                     "Lien refusé : le fichier fait {got}, pas {have} (ce n'est pas le même)",
-                    "Link refused: the file is {got}, not {have} (not the same file)"
+                    "Link refused: the file is {got}, not {have} (not the same file)",
+                    got = got,
+                    have = have
                 ));
                 return;
             }
@@ -1586,7 +1588,7 @@ impl Manager {
         } else {
             let Some(target) = target_for(&settings, name, &entries, None) else {
                 drop(entries);
-                self.notice(false, &trf!("Déjà téléchargé, ignoré : {name}", "Already downloaded, skipped: {name}"));
+                self.notice(false, &trf!("Déjà téléchargé, ignoré : {name}", "Already downloaded, skipped: {name}", name = name));
                 return None;
             };
             target
@@ -1827,19 +1829,19 @@ fn describe(err: &engine::EngineError) -> String {
             Some(404) => tr!("fichier introuvable (404)", "file not found (404)").into(),
             Some(410) => tr!("lien expiré (410)", "link expired (410)").into(),
             Some(429) => tr!("le serveur limite les connexions (429)", "the server limits connections (429)").into(),
-            Some(s @ 500..=599) => trf!("erreur du serveur ({s})", "server error ({s})"),
-            Some(s) => trf!("le serveur a répondu {s}", "the server answered {s}"),
+            Some(s @ 500..=599) => trf!("erreur du serveur ({s})", "server error ({s})", s = s),
+            Some(s) => trf!("le serveur a répondu {s}", "the server answered {s}", s = s),
             None if e.is_timeout() => tr!("délai dépassé, connexion trop lente", "timed out, connection too slow").into(),
             None if e.is_connect() => tr!("connexion impossible au serveur", "cannot connect to the server").into(),
             None => tr!("connexion interrompue", "connection interrupted").into(),
         },
-        E::Io(e) => trf!("erreur disque : {e}", "disk error: {e}"),
+        E::Io(e) => trf!("erreur disque : {e}", "disk error: {e}", e = e),
         E::RangeIgnored => tr!("le serveur a renvoyé une plage incohérente", "the server sent an inconsistent range").into(),
         E::Empty => tr!("le serveur n'a renvoyé aucune donnée (lien expiré ou protégé)", "the server sent no data (link expired or protected)").into(),
         E::Truncated => tr!("connexion coupée avant la fin", "connection cut before the end").into(),
         E::LocalNetwork => tr!("bloqué : un contenu Internet visait votre réseau local", "blocked: Internet content pointing into your local network").into(),
-        E::Playlist(m) => trf!("flux vidéo : {m}", "video stream: {m}"),
-        E::Mux(e) => trf!("fusion audio/vidéo impossible : {e}", "cannot merge audio and video: {e}"),
+        E::Playlist(m) => trf!("flux vidéo : {m}", "video stream: {m}", m = m),
+        E::Mux(e) => trf!("fusion audio/vidéo impossible : {e}", "cannot merge audio and video: {e}", e = e),
     }
 }
 

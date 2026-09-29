@@ -124,7 +124,7 @@ impl Manager {
                 Ok(r) if r.status() == reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED => {
                     this.notice(true, tr!("Le proxy refuse l'identifiant ou le mot de passe (407).", "The proxy refuses the login or password (407)."));
                 }
-                Ok(_) => this.notice(false, &trf!("Le proxy fonctionne ({ms} ms).", "The proxy works ({ms} ms).")),
+                Ok(_) => this.notice(false, &trf!("Le proxy fonctionne ({ms} ms).", "The proxy works ({ms} ms).", ms = ms)),
                 Err(e) if e.is_timeout() => this.notice(true, tr!("Le proxy ne répond pas (15 s).", "The proxy does not answer (15 s).")),
                 Err(_) => this.notice(true, tr!("Connexion par le proxy impossible.", "Cannot connect through the proxy.")),
             }

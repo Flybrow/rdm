@@ -119,16 +119,16 @@ impl App<'_> {
             update::State::Available(r) => {
                 let detail = if update::installs_itself(&r) { tr!("Cliquer pour installer", "Click to install") } else { tr!("Voir la nouvelle version", "See the new version") };
                 let version = &r.version;
-                (trf!("Version {version} disponible", "Version {version} available"), detail.to_owned(), true, false, None)
+                (trf!("Version {version} disponible", "Version {version} available", version = version), detail.to_owned(), true, false, None)
             }
             update::State::Downloading(f) => {
                 let pct = (f * 100.0) as u32;
-                (tr!("Mise à jour…", "Updating…").to_owned(), trf!("téléchargement {pct} %", "downloading {pct} %"), false, true, None)
+                (tr!("Mise à jour…", "Updating…").to_owned(), trf!("téléchargement {pct} %", "downloading {pct} %", pct = pct), false, true, None)
             }
             update::State::Installing => (tr!("Installation…", "Installing…").to_owned(), tr!("RDM redémarre tout seul", "RDM restarts by itself").to_owned(), false, true, None),
             update::State::InstallFailed(r, reason) => {
                 let version = &r.version;
-                (trf!("Version {version} : échec", "Version {version}: failed"), tr!("Cliquer pour réessayer", "Click to retry").to_owned(), true, false, Some(reason))
+                (trf!("Version {version} : échec", "Version {version}: failed", version = version), tr!("Cliquer pour réessayer", "Click to retry").to_owned(), true, false, Some(reason))
             }
             _ => return None,
         };

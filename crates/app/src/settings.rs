@@ -207,7 +207,7 @@ impl Settings {
             None if self.categorize => {
                 // Folder names follow the interface language; one created under the other name
                 // (the language changed since) keeps being used.
-                let english = crate::i18n::english();
+                let english = !crate::i18n::french();
                 let (name, other) = (category.label(english), category.label(!english));
                 let (dir, previous) = (self.download_dir.join(name), self.download_dir.join(other));
                 if !dir.exists() && previous.is_dir() { previous } else { dir }

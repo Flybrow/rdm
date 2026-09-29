@@ -167,13 +167,13 @@ fn steps(ui: &mut Ui, p: &Palette, browser: Browser, exe: Option<&Path>, done: &
     // What "reopen" opens again: the page, or the package the browser was handed.
     let mut reopen = (browser.extensions_page().to_owned(), tr!("Rouvrir la page des extensions", "Reopen the extensions page"));
     let opened = |what: &str| {
-        if done.launched { trf!("{name} vient de s'ouvrir sur {what}.", "{name} just opened {what}.") } else { trf!("Ouvrez {what} dans {name}.", "Open {what} in {name}.") }
+        if done.launched { trf!("{name} vient de s'ouvrir sur {what}.", "{name} just opened {what}.", name = name, what = what) } else { trf!("Ouvrez {what} dans {name}.", "Open {what} in {name}.", name = name, what = what) }
     };
     let reopen_package = tr!("Rouvrir le paquet", "Reopen the package");
     match browser.flavour() {
         Flavour::Chromium => {
             let page = opened(browser.extensions_page());
-            step(ui, p, 1, &trf!("{page} Activez le « Mode développeur » (interrupteur de la page).", "{page} Turn on \"Developer mode\" (the page's switch)."));
+            step(ui, p, 1, &trf!("{page} Activez le « Mode développeur » (interrupteur de la page).", "{page} Turn on \"Developer mode\" (the page's switch).", page = page));
             step(ui, p, 2, tr!("Cliquez sur « Charger l'extension non empaquetée » et choisissez ce dossier :", "Click \"Load unpacked\" and choose this folder:"));
             path_row(ui, p, &done.folder, copied);
             step(
@@ -197,9 +197,9 @@ fn steps(ui: &mut Ui, p: &Palette, browser: Browser, exe: Option<&Path>, done: &
         Flavour::Firefox if done.signed => {
             let package = extension::base().join("rdm-firefox-signed.xpi");
             let first = if done.launched {
-                trf!("{name} demande de confirmer l'ajout de « RDM » : cliquez sur « Ajouter ».", "{name} asks to confirm adding \"RDM\": click \"Add\".")
+                trf!("{name} demande de confirmer l'ajout de « RDM » : cliquez sur « Ajouter ».", "{name} asks to confirm adding \"RDM\": click \"Add\".", name = name)
             } else {
-                trf!("Ouvrez ce fichier avec {name}, puis cliquez sur « Ajouter » :", "Open this file with {name}, then click \"Add\":")
+                trf!("Ouvrez ce fichier avec {name}, puis cliquez sur « Ajouter » :", "Open this file with {name}, then click \"Add\":", name = name)
             };
             step(ui, p, 1, &first);
             if !done.launched {
@@ -237,7 +237,7 @@ fn steps(ui: &mut Ui, p: &Palette, browser: Browser, exe: Option<&Path>, done: &
         }
         Flavour::Firefox => {
             let page = opened(tr!("about:debugging (« Ce Firefox »)", "about:debugging (\"This Firefox\")"));
-            step(ui, p, 1, &trf!("{page} Cliquez sur « Charger un module complémentaire temporaire… ».", "{page} Click \"Load Temporary Add-on…\"."));
+            step(ui, p, 1, &trf!("{page} Cliquez sur « Charger un module complémentaire temporaire… ».", "{page} Click \"Load Temporary Add-on…\".", page = page));
             step(ui, p, 2, tr!("Choisissez le fichier manifest.json de ce dossier :", "Choose the manifest.json file of this folder:"));
             path_row(ui, p, &done.folder, copied);
             step(ui, p, 3, connects_itself());

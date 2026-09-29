@@ -98,7 +98,7 @@ impl std::fmt::Display for Error {
             Self::BadKey => f.write_str(tr!("clé API VirusTotal refusée : vérifiez-la dans les paramètres", "VirusTotal API key refused: check it in the settings")),
             Self::Quota => f.write_str(tr!("quota de l'API VirusTotal atteint, réessayez plus tard", "VirusTotal API quota reached, try again later")),
             Self::TooLarge => f.write_str(tr!("fichier trop volumineux pour VirusTotal (650 Mo au maximum)", "file too large for VirusTotal (650 MB at most)")),
-            Self::Status(s) => f.write_str(&trf!("VirusTotal a répondu {s}", "VirusTotal answered {s}")),
+            Self::Status(s) => f.write_str(&trf!("VirusTotal a répondu {s}", "VirusTotal answered {s}", s = s)),
             Self::Network => f.write_str(tr!("VirusTotal est injoignable (connexion)", "VirusTotal cannot be reached (connection)")),
             Self::Io => f.write_str(tr!("fichier illisible", "unreadable file")),
             Self::Timeout => f.write_str(tr!("VirusTotal n'a pas terminé l'analyse à temps", "VirusTotal did not finish the analysis in time")),

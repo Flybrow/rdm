@@ -15,7 +15,7 @@ use super::theme::{self, Palette};
 
 // ── Numbers, in the interface language ───────────────────────────────────
 pub fn bytes(n: u64) -> String {
-    let units: [&str; 5] = if crate::i18n::english() { ["B", "KB", "MB", "GB", "TB"] } else { ["o", "Ko", "Mo", "Go", "To"] };
+    let units: [&str; 5] = if crate::i18n::french() { ["o", "Ko", "Mo", "Go", "To"] } else { ["B", "KB", "MB", "GB", "TB"] };
     let mut v = n as f64;
     let mut unit = 0;
     while v >= 1024.0 && unit < units.len() - 1 {
@@ -29,10 +29,10 @@ pub fn speed(bytes_per_sec: f64) -> String {
     format!("{}/s", bytes(bytes_per_sec.max(0.0) as u64))
 }
 
-/// One decimal: `1,5` in French, `1.5` in English.
+/// One decimal: `1,5` in French and most languages, `1.5` in English and East Asian ones.
 fn decimal(v: f64) -> String {
     let text = format!("{v:.1}");
-    if crate::i18n::english() { text } else { text.replace('.', ",") }
+    if crate::i18n::decimal_comma() { text.replace('.', ",") } else { text }
 }
 
 pub fn duration(secs: u64) -> String {

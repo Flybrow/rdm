@@ -21,7 +21,7 @@
   <img src="docs/screenshots/dashboard-dark.png" width="880" alt="RDM, dark theme">
 </p>
 
-RDM speaks **English and French**: it follows the system's language, and **Settings → Language** switches at once. The browser extension follows the browser's language.
+RDM speaks **16 languages** (English, French, Spanish, German, Italian, Portuguese, Dutch, Polish, Russian, Ukrainian, Turkish, Vietnamese, Indonesian, Chinese (Simplified), Japanese, Korean): it follows the system's language, and the **Settings → Language** drop-down switches at once. Translations live in `crates/app/locales/<code>.json` (English text → translation; a missing text shows in English). Right-to-left and complex scripts (Arabic, Hebrew, Hindi…) are not supported yet: the UI toolkit cannot shape or reorder them. The browser extension follows the browser's language.
 
 ## Download
 
