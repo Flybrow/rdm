@@ -171,8 +171,9 @@ impl App<'_> {
                                 self.manager.install_extension(browser);
                                 *open = Some(browser);
                             }
+                            // An icon: beside "Reinstall", a second labelled button left no room for the status line.
                             if seen.is_some()
-                                && ghost_button(ui, icon::TRASH, tr!("Supprimer l'extension", "Remove the extension"))
+                                && widgets::icon_button(ui, icon::TRASH, tr!("Supprimer l'extension", "Remove the extension"), Some(p.danger))
                                     .on_hover_text(tr!(
                                         "La désinstalle de ce navigateur à son prochain échange avec RDM (déjà supprimée : RDM l'oublie).",
                                         "Uninstalls it from this browser at its next exchange with RDM (already removed: RDM forgets it)."
