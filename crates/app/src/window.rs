@@ -4,7 +4,7 @@
 //! Windows, which left eframe's event loop polling at 100 % CPU, and Wayland cannot hide one at all.
 //! What remains is a window that may be minimized or behind others.
 
-use eframe::egui::{Context, ViewportCommand};
+use eframe::egui::{Color32, Context, ViewportCommand};
 
 #[derive(Clone, Copy, Default)]
 pub struct Window {
@@ -28,6 +28,28 @@ impl Window {
             let _ = cc;
             Self::default()
         }
+    }
+
+    /// Windows 11 draws the title bar in RDM's colours (background, title, border) instead of its
+    /// own grey; Windows 10 only takes the dark mode. Elsewhere the window manager decides.
+    pub fn paint_title_bar(self, dark: bool, background: Color32, text: Color32, border: Color32) {
+        #[cfg(windows)]
+        if self.hwnd != 0 {
+            let hwnd = self.hwnd as win::HWND;
+            // COLORREF: 0x00BBGGRR.
+            let colorref = |c: Color32| u32::from(c.r()) | u32::from(c.g()) << 8 | u32::from(c.b()) << 16;
+            let set = |attribute: i32, value: u32| {
+                // SAFETY: our own window; a 4-byte value, as each of these attributes expects. An
+                // attribute this Windows does not know is refused, harmlessly.
+                unsafe { win::DwmSetWindowAttribute(hwnd, attribute as u32, (&raw const value).cast(), 4) };
+            };
+            set(win::DWMWA_USE_IMMERSIVE_DARK_MODE, u32::from(dark));
+            set(win::DWMWA_CAPTION_COLOR, colorref(background));
+            set(win::DWMWA_TEXT_COLOR, colorref(text));
+            set(win::DWMWA_BORDER_COLOR, colorref(border));
+        }
+        #[cfg(not(windows))]
+        let _ = (self, dark, background, text, border);
     }
 
     pub fn show(self, ctx: &Context) {
@@ -100,6 +122,7 @@ mod tests {
 mod win {
     pub use windows_sys::Win32::{
         Foundation::HWND,
+        Graphics::Dwm::{DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute},
         UI::WindowsAndMessaging::{
             ASFW_ANY, AllowSetForegroundWindow, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, SW_RESTORE, SW_SHOW, SWP_ASYNCWINDOWPOS,
             SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetWindowPos, ShowWindowAsync,
