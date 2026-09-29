@@ -47,6 +47,8 @@ const CHECKPOINT: Duration = Duration::from_secs(20);
 /// slow start, connections double at each tick while they pay off — full speed within a second
 /// or two on a fast line.
 const RAMP_EVERY: Duration = Duration::from_millis(500);
+/// How often the pieces are shown to the UI (its progress bar).
+const SHOW_PIECES: Duration = Duration::from_millis(250);
 /// Longest wait between two attempts of the last connection (network down, busy server).
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
 /// A server without range support restarts the file from zero after a cut: at most this often.
@@ -168,6 +170,8 @@ pub(crate) async fn run(
     let mut checkpoint = interval_at(Instant::now() + CHECKPOINT, CHECKPOINT);
     let mut ramp = interval_at(Instant::now() + RAMP_EVERY, RAMP_EVERY);
     ramp.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut show = interval_at(Instant::now(), SHOW_PIECES);
+    show.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let (mut growth, mut counted, mut ticked) = (Growth::default(), ctx.progress.downloaded.load(Relaxed), Instant::now());
     loop {
         tokio::select! {
@@ -186,6 +190,7 @@ pub(crate) async fn run(
             _ = checkpoint.tick(), if info.ranges => {
                 let _ = persist(&job.target, &state, info.version.as_deref(), &ctx.slots.segments()).await;
             }
+            _ = show.tick(), if info.ranges => ctx.progress.set_pieces(ctx.slots.segments()),
             // More connections while they help: waiting pieces first, then parts of the piece
             // expected to finish last; dead connections replaced.
             _ = ramp.tick(), if info.ranges && failure.is_none() && !ctx.stop.is_cancelled() => {
@@ -205,6 +210,7 @@ pub(crate) async fn run(
         }
     }
 
+    ctx.progress.set_pieces(Vec::new());
     let done = ctx.slots.all_done();
     if done && failure.is_none() {
         let _ = fs::remove_file(&state).await;

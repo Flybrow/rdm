@@ -125,6 +125,37 @@ pub fn progress(ui: &Ui, rect: Rect, fraction: Option<f32>, (from, to): (Color32
     }
 }
 
+/// The bar of a download split across connections: each piece at its place in the file, filled
+/// as far as its connection got, with a thin gap between pieces and a glow at the head of each
+/// piece still downloading.
+pub fn pieces_progress(ui: &Ui, rect: Rect, pieces: &[domain::Segment], total: u64, (from, to): (Color32, Color32)) {
+    let p = Palette::of(ui);
+    let painter = ui.painter();
+    let radius = CornerRadius::same((rect.height() / 2.0) as u8);
+    painter.rect_filled(rect, radius, p.border);
+    let x_of = |byte: u64| rect.left() + rect.width() * (byte.min(total) as f64 / total as f64) as f32;
+    let time = ui.input(|i| i.time) as f32;
+    let clip = painter.with_clip_rect(rect);
+    for piece in pieces {
+        let (left, right) = (x_of(piece.start), x_of(piece.end.saturating_add(1)));
+        // A 1.5 px gap on the right: the pieces read as separate connections.
+        let right = if right - left > 4.0 { right - 1.5 } else { right };
+        let head = x_of(piece.pos).clamp(left, right);
+        if head > left {
+            // The colour of the whole bar at this place: the pieces together show one gradient.
+            let t = |x: f32| ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            let fill = Rect::from_min_max(pos2(left, rect.top()), pos2(head, rect.bottom()));
+            clip.add(gradient(ui, fill, 1, from.lerp_to_gamma(to, t(left)), from.lerp_to_gamma(to, t(head)), Vec2::X));
+        }
+        if piece.pos <= piece.end && head < right {
+            // Still downloading: a soft pulse at the head of the piece.
+            let alpha = 110.0 + 90.0 * (time * 3.0 + left * 0.05).sin();
+            let glow = Rect::from_min_max(pos2((head - 3.0).max(left), rect.top()), pos2(head + 1.0, rect.bottom()));
+            clip.rect_filled(glow, 1, Color32::from_white_alpha(alpha as u8));
+        }
+    }
+}
+
 // ── Buttons ──────────────────────────────────────────────────────────────
 fn hover_anim(ui: &Ui, response: &Response) -> f32 {
     ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered() || response.has_focus(), 0.12)
@@ -299,6 +330,52 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T,
         let color = if selected { p.text } else { p.muted };
         let font = if selected { theme::semibold(13.0) } else { theme::regular(13.0) };
         painter.text(cell.center(), Align2::CENTER_CENTER, format!("{glyph}  {label}"), font, color);
+    }
+    changed
+}
+
+/// Tabs: like `segmented`, but each tab as wide as its label (plus padding inside), with a gap
+/// between tabs and around them; spare width is shared out so the bar fills its line.
+pub fn tab_bar<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str, &str)]) -> bool {
+    const INSET: f32 = 5.0; // between the track's edge and the tabs
+    const GAP: f32 = 6.0; // between two tabs
+    const PAD: f32 = 16.0; // inside a tab, on each side of its label (at most)
+    const MIN_PAD: f32 = 6.0;
+    let p = Palette::of(ui);
+    let label = |i: usize| format!("{}  {}", options[i].1, options[i].2);
+    // The selected tab's (semibold) width for every tab: selecting one does not move the others.
+    let text: Vec<f32> = (0..options.len()).map(|i| ui.painter().layout_no_wrap(label(i), theme::semibold(13.0), Color32::WHITE).size().x).collect();
+    let gaps = INSET * 2.0 + GAP * options.len().saturating_sub(1) as f32;
+    // Labels too long for the line (a long language): less padding first, overflow last.
+    let room = (ui.available_width() - gaps - text.iter().sum::<f32>()) / (2 * options.len()) as f32;
+    let pad = room.clamp(MIN_PAD, PAD);
+    let natural: Vec<f32> = text.iter().map(|t| t + 2.0 * pad).collect();
+    let needed = natural.iter().sum::<f32>() + gaps;
+    let width = ui.available_width().max(needed);
+    let extra = (width - needed) / options.len() as f32;
+    let (rect, own) = ui.allocate_exact_size(vec2(width, 44.0), Sense::hover());
+    let track = if p.dark { p.bg } else { p.border.lerp_to_gamma(p.raised, 0.35) };
+    ui.painter().rect_filled(rect, 13, track);
+    let mut changed = false;
+    let mut left = rect.left() + INSET;
+    for (i, (option, _, _)) in options.iter().enumerate() {
+        let cell = Rect::from_min_size(pos2(left, rect.top() + INSET), vec2(natural[i] + extra, rect.height() - 2.0 * INSET));
+        left += cell.width() + GAP;
+        let response = ui.interact(cell, own.id.with(("tab", i)), Sense::click());
+        if response.clicked() && *value != *option {
+            *value = *option;
+            changed = true;
+        }
+        let selected = *value == *option;
+        let painter = ui.painter();
+        if selected {
+            soft_shadow(painter, cell, 9, 0.5, p.dark);
+            painter.rect_filled(cell, 9, p.surface);
+        } else if response.hovered() {
+            painter.rect_filled(cell, 9, p.surface.gamma_multiply(0.5));
+        }
+        let (color, font) = if selected { (p.text, theme::semibold(13.0)) } else { (p.muted, theme::regular(13.0)) };
+        painter.text(cell.center(), Align2::CENTER_CENTER, label(i), font, color);
     }
     changed
 }

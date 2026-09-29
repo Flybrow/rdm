@@ -93,7 +93,7 @@ const REFUSED: u16 = 2;
 fn route(method: Method, path: &str) -> Option<bool> {
     match (method, path) {
         (Method::Get | Method::Post, "/ping") | (Method::Get, "/config") => Some(false),
-        (Method::Post, "/probe" | "/check" | "/pair" | "/youtube/state" | "/youtube/install" | "/youtube/extract") => Some(false),
+        (Method::Post, "/probe" | "/check" | "/pair" | "/installed" | "/uninstalled" | "/youtube/state" | "/youtube/install" | "/youtube/extract") => Some(false),
         // Explicit actions of the user: RDM starts if needed.
         (Method::Post, "/add" | "/show" | "/record/start") => Some(true),
         _ => None,
@@ -414,7 +414,12 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    use std::{io, os::unix::process::CommandExt, path::Path, process::Command};
+    use std::{
+        io,
+        os::unix::process::CommandExt,
+        path::{Path, PathBuf},
+        process::Command,
+    };
 
     use super::{HOST, manifest, write_if_changed};
 
@@ -433,16 +438,53 @@ mod imp {
 
     pub fn register(exe: &Path) -> io::Result<()> {
         let Some(home) = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()) else { return Ok(()) };
+        let mut hosts: Vec<(PathBuf, bool)> = Vec::new();
         for (dirs, firefox) in [(&CHROMIUM_DIRS[..], false), (&FIREFOX_DIRS[..], true)] {
-            let bytes = manifest(exe, firefox);
-            for (browser, hosts) in dirs {
+            for (browser, dir) in dirs {
                 let browser = home.join(browser);
                 if browser.is_dir() {
-                    let _ = write_if_changed(&browser.join(hosts).join(format!("{HOST}.json")), &bytes);
+                    hosts.push((browser.join(dir), firefox));
                 }
             }
         }
+        // Any other browser of either family, found by its profile folder (as IDM finds any
+        // browser): no list to keep up to date.
+        for (dir, firefox) in discovered(&home) {
+            if !hosts.iter().any(|(h, _)| *h == dir) {
+                hosts.push((dir, firefox));
+            }
+        }
+        let (chromium, firefox) = (manifest(exe, false), manifest(exe, true));
+        for (dir, is_firefox) in hosts {
+            let _ = write_if_changed(&dir.join(format!("{HOST}.json")), if is_firefox { &firefox } else { &chromium });
+        }
         Ok(())
+    }
+
+    /// Where the browsers of the home folder look for connectors: a Chromium-based browser keeps
+    /// its profiles in `~/.config/<name>` (or one level deeper, `BraveSoftware/Brave-Browser`)
+    /// with a `Local State` file, and reads `NativeMessagingHosts` there; a Firefox-based one
+    /// keeps a `profiles.ini` in `~/.<name>` (or one level deeper, `.mozilla/firefox`) and reads
+    /// `~/.<name>/native-messaging-hosts`.
+    fn discovered(home: &Path) -> Vec<(PathBuf, bool)> {
+        let subdirs = |dir: &Path| -> Vec<PathBuf> {
+            std::fs::read_dir(dir).map(|e| e.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()).unwrap_or_default()
+        };
+        let mut found = Vec::new();
+        for dir in subdirs(&home.join(".config")) {
+            for profile in std::iter::once(dir.clone()).chain(subdirs(&dir)) {
+                // Electron applications (VS Code, Discord…) keep a `Local State` too, not a `Default` profile.
+                if profile.join("Local State").is_file() && profile.join("Default").is_dir() {
+                    found.push((profile.join("NativeMessagingHosts"), false));
+                }
+            }
+        }
+        for dir in subdirs(home).into_iter().filter(|d| d.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'))) {
+            if std::iter::once(dir.clone()).chain(subdirs(&dir)).any(|d| d.join("profiles.ini").is_file()) {
+                found.push((dir.join("native-messaging-hosts"), true));
+            }
+        }
+        found
     }
 
     /// In its own session: closing the browser (which ends the connector's process group) must

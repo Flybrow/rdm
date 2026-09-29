@@ -21,6 +21,8 @@ use crate::{
 /// Fixed so the list can be virtualized: only the cards in view are laid out.
 const CARD_HEIGHT: f32 = 86.0;
 const CARD_GAP: f32 = 10.0;
+/// The most pieces the bar draws one by one (see `widgets::pieces_progress`).
+const MAX_SHOWN_PIECES: usize = 32;
 
 impl App<'_> {
     pub(super) fn list(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
@@ -195,7 +197,14 @@ fn card(ui: &mut Ui, p: &Palette, settings: &Settings, e: &Entry, actions: &mut 
         Status::Running => (p.accent, p.accent2),
     };
     let bar_fraction = if *status == Status::Completed { Some(1.0) } else if running { shown } else { shown.or(Some(0.0)) };
-    widgets::progress(ui, bar, bar_fraction, gradient, running);
+    // Running over several connections: one piece of the bar per connection. Past a few dozen
+    // pieces the bar would be only gaps: the plain bar then.
+    let pieces = if running && total > 0 { e.progress.pieces() } else { Vec::new() };
+    if (2..=MAX_SHOWN_PIECES).contains(&pieces.len()) {
+        widgets::pieces_progress(ui, bar, &pieces, total, gradient);
+    } else {
+        widgets::progress(ui, bar, bar_fraction, gradient, running);
+    }
 
     if response.double_clicked() && *status == Status::Completed {
         actions.push(Action::Open(d.target.clone()));

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { dispositionName, downloadName, isCapturable, isHls, isMediaType, isMediaUrl, siteOf } from "../shared.js";
+import { browserKey, dispositionName, downloadName, isCapturable, isHls, isMediaType, isMediaUrl, siteOf } from "../shared.js";
 
 const LIST = "zip mp4 webm iso 7z";
 
@@ -64,4 +64,22 @@ test("a top-level response is a download when attached or not showable", () => {
   assert.equal(downloadName("https://x.io/film.mp4", "", "video/mp4"), "", "played in the tab");
   assert.equal(downloadName("https://x.io/", "", "text/html; charset=utf-8"), "");
   assert.equal(downloadName("https://x.io/a%20b.zip", "", "application/zip"), "a b.zip");
+});
+
+test("browser keys, as RDM computes them (extension::key_of)", () => {
+  const cases = [
+    ["Google Chrome", "chrome"],
+    ["Microsoft Edge", "edge"],
+    ["Mozilla Firefox", "firefox"],
+    ["Firefox", "firefox"],
+    ["Waterfox", "waterfox"],
+    ["Mullvad Browser", "mullvad"],
+    ["Zen Browser", "zen"],
+    ["Opera Stable", "opera"],
+    ["Brave", "brave"],
+    ["Thorium", "thorium"],
+    ["Supercalifragilisticexpialidocious", "supercalifragili"],
+    ["", ""],
+  ];
+  for (const [name, key] of cases) assert.equal(browserKey(name), key, name);
 });

@@ -82,11 +82,20 @@ pub struct AddRequest {
     /// The user's answer for this download when its file already exists (else the settings').
     #[serde(skip)]
     pub existing: Option<ExistingFile>,
+    /// Shown to the user only because its file already exists (not a browser download to confirm).
+    #[serde(skip)]
+    pub existing_only: bool,
 }
 
 impl AddRequest {
     pub fn from_url(url: Url) -> Self {
-        Self { url, audio_url: None, filename: None, referrer: None, cookies: None, user_agent: None, existing: None }
+        Self { url, audio_url: None, filename: None, referrer: None, cookies: None, user_agent: None, existing: None, existing_only: false }
+    }
+
+    /// The request behind a download of the list, from its link and headers.
+    fn from_parts(url: Url, audio_url: Option<Url>, headers: &[(String, String)]) -> Self {
+        let get = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+        Self { audio_url, referrer: get("referer"), cookies: get("cookie"), user_agent: get("user-agent"), ..Self::from_url(url) }
     }
 
     pub fn headers(&self) -> Vec<(String, String)> {
@@ -95,6 +104,18 @@ impl AddRequest {
             .filter_map(|(k, v)| Some((k.to_owned(), v.clone().filter(|v| !v.is_empty())?)))
             .collect()
     }
+}
+
+/// A download waiting for the user's answer, as the window shows it.
+pub struct ToConfirm {
+    pub url: Url,
+    /// Its name, when known.
+    pub name: Option<String>,
+    /// A file of that name is already there, and the user wants to be asked (`ExistingFile::Ask`).
+    pub ask_existing: bool,
+    /// Every browser download is confirmed (`confirm_browser`); otherwise only the file is asked about.
+    pub confirming: bool,
+    pub waiting: usize,
 }
 
 pub struct Entry {
@@ -435,10 +456,26 @@ pub struct Manager {
     /// Browsers the extension has talked from (key → Unix time): the extension window shows which
     /// ones are connected.
     browsers: Mutex<BTreeMap<String, u64>>,
+    /// Browsers whose extension the user asked to remove (Unix time of the request): it uninstalls
+    /// itself at its next check-in. Kept a day: past that, an extension heard from again is taken
+    /// as reinstalled by hand.
+    uninstalls: Mutex<BTreeMap<String, u64>>,
     installs: Mutex<HashMap<Browser, Install>>,
+    /// Browsers the user added by their executable (portable ones, or any Windows does not list).
+    custom_browsers: Mutex<Vec<PathBuf>>,
+    /// Browsers RDM just opened on the extension's package or page, and when: the tab it opened is
+    /// closed once the extension is installed (see `Manager::installed_by_rdm`).
+    opened_to_install: Mutex<HashMap<String, Instant>>,
 }
 
 const BROWSERS_FILE: &str = "browsers.json";
+/// Extensions to remove (see `Manager::remove_extension`).
+const UNINSTALLS_FILE: &str = "uninstalls.json";
+const UNINSTALL_TTL_SECS: u64 = 24 * 3600;
+/// Browsers added by hand (see `Manager::add_browser`).
+const CUSTOM_BROWSERS_FILE: &str = "custom_browsers.json";
+/// How long after RDM opened a browser to install the extension its tab is still taken as RDM's.
+const INSTALL_TAB_TTL: Duration = Duration::from_secs(15 * 60);
 /// Messages kept for the window while it is closed.
 const MAX_NOTICES: usize = 20;
 
@@ -565,7 +602,20 @@ impl Manager {
                     .and_then(|b| serde_json::from_slice(&b).ok())
                     .unwrap_or_default(),
             ),
+            uninstalls: Mutex::new(
+                fs::read(crate::settings::config_file(UNINSTALLS_FILE))
+                    .ok()
+                    .and_then(|b| serde_json::from_slice(&b).ok())
+                    .unwrap_or_default(),
+            ),
             installs: Mutex::default(),
+            custom_browsers: Mutex::new(
+                fs::read(crate::settings::config_file(CUSTOM_BROWSERS_FILE))
+                    .ok()
+                    .and_then(|b| serde_json::from_slice(&b).ok())
+                    .unwrap_or_default(),
+            ),
+            opened_to_install: Mutex::default(),
         });
         this.spawn_ticker();
         this.spawn_update_checks();
@@ -697,6 +747,9 @@ impl Manager {
     /// The extension reported which browser it runs in (`x-rdm-browser`).
     pub fn browser_seen(&self, key: &str) {
         let Some(browser) = Browser::from_key(key) else { return };
+        if self.uninstall_requested(key) {
+            return; // on its way out: not "installed" again
+        }
         let now = unix_now();
         let mut seen = lock(&self.browsers);
         let before = seen.insert(browser.key().to_owned(), now);
@@ -714,12 +767,99 @@ impl Manager {
         lock(&self.browsers).get(browser.key()).copied()
     }
 
+    /// "Remove the extension": RDM forgets it in `browser` at once, and the extension, if still
+    /// there, uninstalls itself at its next check-in (at the browser's start, then every few minutes).
+    pub fn remove_extension(&self, browser: Browser) {
+        let key = browser.key().to_owned();
+        let seen = {
+            let mut seen = lock(&self.browsers);
+            seen.remove(&key);
+            seen.clone()
+        };
+        save_json(BROWSERS_FILE, &seen);
+        let pending = {
+            let mut pending = lock(&self.uninstalls);
+            pending.insert(key, unix_now());
+            pending.clone()
+        };
+        save_json(UNINSTALLS_FILE, &pending);
+        lock(&self.installs).remove(&browser);
+        self.repaint();
+    }
+
+    /// Whether the extension in the browser named `key` must uninstall itself.
+    pub fn uninstall_requested(&self, key: &str) -> bool {
+        lock(&self.uninstalls).get(key).is_some_and(|&t| unix_now().saturating_sub(t) < UNINSTALL_TTL_SECS)
+    }
+
+    /// The request is over: the extension is uninstalling itself, or the user installs it again.
+    fn forget_uninstall(&self, key: &str) {
+        let pending = {
+            let mut pending = lock(&self.uninstalls);
+            if pending.remove(key).is_none() {
+                return;
+            }
+            pending.clone()
+        };
+        save_json(UNINSTALLS_FILE, &pending);
+    }
+
+    /// The extension of the browser named `key` got the request and uninstalls itself now.
+    pub fn extension_uninstalled(&self, key: &str) {
+        self.forget_uninstall(key);
+        self.repaint();
+    }
+
+    /// Every browser the extension was heard from, with when (Unix time).
+    pub fn browsers_seen(&self) -> Vec<(Browser, u64)> {
+        lock(&self.browsers).iter().filter_map(|(key, &t)| Some((Browser::from_key(key)?, t))).collect()
+    }
+
+    /// The browsers of this computer (Windows' list, the well-known ones, those added by hand),
+    /// then those the extension was heard from that are not among them (a portable browser).
+    pub fn browsers(&self) -> Vec<Browser> {
+        let mut list = extension::installed(&lock(&self.custom_browsers));
+        for (b, _) in self.browsers_seen() {
+            if !list.contains(&b) {
+                list.push(b);
+            }
+        }
+        list
+    }
+
+    /// "Add a browser…": the browser at `exe`, remembered. `None`: not a browser the extension
+    /// can run in (neither Chromium- nor Firefox-based).
+    pub fn add_browser(&self, exe: PathBuf) -> Option<Browser> {
+        let browser = Browser::at(&exe)?;
+        let list = {
+            let mut list = lock(&self.custom_browsers);
+            if !list.contains(&exe) {
+                list.push(exe);
+            }
+            list.clone()
+        };
+        save_json(CUSTOM_BROWSERS_FILE, &list);
+        Some(browser)
+    }
+
+    /// Whether an installation is being prepared (the window shows a spinner).
+    pub fn installing(&self) -> bool {
+        lock(&self.installs).values().any(|i| matches!(i, Install::Working))
+    }
+
+    /// The extension just installed in the browser named `key`: whether RDM opened that browser
+    /// for it a moment ago (then the tab it opened can go). Answered once.
+    pub fn installed_by_rdm(&self, key: &str) -> bool {
+        lock(&self.opened_to_install).remove(key).is_some_and(|at| at.elapsed() < INSTALL_TAB_TTL)
+    }
+
     pub fn install_state(&self, browser: Browser) -> Option<Install> {
         lock(&self.installs).get(&browser).cloned()
     }
 
     /// Prepares the extension for `browser` and opens the browser where the user confirms it.
     pub fn install_extension(self: &Arc<Self>, browser: Browser) {
+        self.forget_uninstall(browser.key());
         if matches!(lock(&self.installs).insert(browser, Install::Working), Some(Install::Working)) {
             return; // already on it
         }
@@ -730,6 +870,9 @@ impl Manager {
                 Ok(done) => Install::Done(done),
                 Err(reason) => Install::Failed(reason),
             };
+            if matches!(&state, Install::Done(done) if done.launched) {
+                lock(&this.opened_to_install).insert(browser.key().to_owned(), Instant::now());
+            }
             lock(&this.installs).insert(browser, state);
             this.repaint();
         });
@@ -758,7 +901,7 @@ impl Manager {
                 return Ok(done);
             }
             // Waterfox can install the unsigned package for good (signature check off: see the steps).
-            if browser == Browser::Waterfox
+            if browser.key() == "waterfox"
                 && let Some(xpi) = &done.xpi
             {
                 done.launched = open(&xpi.to_string_lossy());
@@ -839,9 +982,24 @@ impl Manager {
     /// A download from the browser extension: added at once, or first shown in the (raised)
     /// window for the user's go-ahead, as the settings say.
     pub fn add_from_browser(self: &Arc<Self>, req: AddRequest) {
-        if !self.with_settings(|s| s.confirm_browser) {
-            return self.add(req);
+        let (confirm, ask) = self.with_settings(|s| (s.confirm_browser, s.existing == ExistingFile::Ask));
+        let exists = req
+            .filename
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(engine::sanitize_file_name)
+            .is_some_and(|n| self.with_settings(|s| s.target_dir(&n)).join(&n).is_file());
+        // Without confirmation, still asked when the file is already there (`ExistingFile::Ask`).
+        if confirm || (ask && exists) {
+            self.wait_for_answer(AddRequest { existing_only: !confirm, ..req });
+        } else {
+            self.add(req);
         }
+    }
+
+    /// Shown in the (raised) window until the user answers (see `to_confirm`).
+    fn wait_for_answer(&self, req: AddRequest) {
         {
             let mut waiting = lock(&self.to_confirm);
             if waiting.iter().any(|w| w.url == req.url) {
@@ -856,14 +1014,14 @@ impl Manager {
         self.repaint();
     }
 
-    /// The first browser download waiting for the user's go-ahead: its link, its name (when the
-    /// page gave one), whether a file of that name is already in its folder, and how many wait.
-    pub fn to_confirm(&self) -> Option<(Url, Option<String>, bool, usize)> {
+    /// The first download waiting for the user's answer.
+    pub fn to_confirm(&self) -> Option<ToConfirm> {
         let waiting = lock(&self.to_confirm);
         let req = waiting.front()?;
         let name = req.filename.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(engine::sanitize_file_name);
+        let (confirming, ask) = self.with_settings(|s| (s.confirm_browser, s.existing == ExistingFile::Ask));
         let exists = name.as_deref().is_some_and(|n| self.with_settings(|s| s.target_dir(n)).join(n).is_file());
-        Some((req.url.clone(), name, exists, waiting.len()))
+        Some(ToConfirm { url: req.url.clone(), name, ask_existing: ask && exists, confirming: confirming && !req.existing_only, waiting: waiting.len() })
     }
 
     /// The user answered for the first waiting download: `download` it or not, with `existing`
@@ -930,6 +1088,22 @@ impl Manager {
         let settings = self.settings();
         let mut entries = lock(&self.entries);
         let Some(i) = entries.iter().position(|e| e.download.id == id) else { return };
+        // Its name known at last (a pasted or copied link): a file of that name already there is
+        // the user's to decide, before anything is written (`ExistingFile::Ask`).
+        let final_name = name.clone().unwrap_or_else(|| entries[i].name.clone());
+        if settings.existing == ExistingFile::Ask
+            && matches!(entries[i].download.status(), Status::Queued)
+            && settings.target_dir(&final_name).join(&final_name).is_file()
+        {
+            let e = entries.remove(i);
+            drop(entries);
+            let mut req = AddRequest::from_parts(e.download.url.clone(), e.download.audio.clone(), &e.headers);
+            req.filename = Some(final_name);
+            req.existing_only = true;
+            self.wait_for_answer(req);
+            self.changed();
+            return;
+        }
         if let Some(name) = name.filter(|n| *n != entries[i].name)
             && matches!(entries[i].download.status(), Status::Queued | Status::Paused)
         {
@@ -1873,7 +2047,8 @@ fn target_for(settings: &Settings, name: &str, taken: &[Entry], except: Option<D
     let dir = settings.target_dir(name);
     let path = dir.join(name);
     match settings.existing {
-        ExistingFile::Rename => Some(unique_path(&dir, name, taken, except)),
+        // Asked beforehand when possible (see `resolved`, `add_from_browser`); otherwise a new name.
+        ExistingFile::Rename | ExistingFile::Ask => Some(unique_path(&dir, name, taken, except)),
         ExistingFile::Skip if path.is_file() => None,
         ExistingFile::Skip => Some(unique_path(&dir, name, taken, except)),
         ExistingFile::Overwrite => {

@@ -84,3 +84,13 @@ export const downloadName = (url, disposition = "", type = "") => {
   }
   return name.split(/[\\/]/).pop();
 };
+
+// Words of a browser's name that do not tell it apart: vendors, and generic words.
+const NOT_A_NAME = new Set(["mozilla", "google", "microsoft", "browser", "stable", "web", "the"]);
+
+/**
+ * The key of a browser's name, as RDM computes it too (`extension::key_of`, same tests): its
+ * first telling word, letters only, lower case, at most 16. "Google Chrome" gives "chrome".
+ */
+export const browserKey = (name = "") =>
+  (name.toLowerCase().split(/[^a-z]+/).find((w) => w && !NOT_A_NAME.has(w)) ?? "").slice(0, 16);

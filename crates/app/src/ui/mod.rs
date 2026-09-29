@@ -255,7 +255,7 @@ fn open_window(
                 ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
             }
             let logo = ctx.load_texture("logo", ColorImage::from_rgba_unmultiplied([128, 128], LOGO_RGBA), TextureOptions::LINEAR);
-            Ok(Box::new(App::new(manager.clone(), shell.clone(), tray, memo, logo, paced)))
+            Ok(Box::new(App::new(manager.clone(), shell.clone(), tray, memo, logo, paced, window)))
         }),
         event_loop,
     );
@@ -428,6 +428,9 @@ impl Memo {
 }
 
 struct App<'a> {
+    window: Window,
+    /// The theme the title bar was last painted for.
+    title_bar_dark: Option<bool>,
     manager: Arc<Manager>,
     shell: Arc<Shell>,
     tray: Option<&'a mut Tray>,
@@ -440,6 +443,8 @@ struct App<'a> {
     unsaved_since: Option<Instant>,
     /// Reveal the VirusTotal key in the settings.
     show_key: bool,
+    /// The settings tab shown (the last one used, while RDM runs).
+    settings_tab: dialogs::SettingsTab,
     /// The settings were opened to ask for the VirusTotal key.
     asking_key: bool,
     /// The browser-extension window, while open.
@@ -475,8 +480,11 @@ impl<'a> App<'a> {
         memo: &'a mut Memo,
         logo: TextureHandle,
         paced: bool,
+        window: Window,
     ) -> Self {
         let mut app = Self {
+            window,
+            title_bar_dark: None,
             manager,
             shell,
             tray,
@@ -486,6 +494,7 @@ impl<'a> App<'a> {
             secrets: None,
             unsaved_since: None,
             show_key: false,
+            settings_tab: dialogs::SettingsTab::default(),
             asking_key: false,
             report: None,
             browsers: None,
@@ -512,7 +521,7 @@ impl<'a> App<'a> {
         settings.extension_offered = true;
         self.manager.apply_settings(settings);
         self.manager.save_settings();
-        if crate::extension::Browser::ALL.into_iter().all(|b| self.manager.browser_last_seen(b).is_none()) {
+        if self.manager.browsers_seen().is_empty() {
             self.open_browsers();
         }
     }
@@ -647,6 +656,13 @@ impl<'a> App<'a> {
 
 impl eframe::App for App<'_> {
     fn update(&mut self, ctx: &Context, _: &mut eframe::Frame) {
+        // The title bar follows the theme (chosen, or the system's when it changes).
+        let dark = ctx.style().visuals.dark_mode;
+        if self.title_bar_dark != Some(dark) {
+            self.title_bar_dark = Some(dark);
+            let p = Palette::from_ctx(ctx);
+            self.window.paint_title_bar(dark, p.bg, p.text, p.border);
+        }
         if self.fonts_language != crate::i18n::active() {
             self.fonts_language = crate::i18n::active();
             theme::install_fonts(ctx);
