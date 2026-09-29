@@ -339,14 +339,17 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T,
 pub fn tab_bar<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str, &str)]) -> bool {
     const INSET: f32 = 5.0; // between the track's edge and the tabs
     const GAP: f32 = 6.0; // between two tabs
-    const PAD: f32 = 16.0; // inside a tab, on each side of its label
+    const PAD: f32 = 16.0; // inside a tab, on each side of its label (at most)
+    const MIN_PAD: f32 = 6.0;
     let p = Palette::of(ui);
     let label = |i: usize| format!("{}  {}", options[i].1, options[i].2);
     // The selected tab's (semibold) width for every tab: selecting one does not move the others.
-    let natural: Vec<f32> = (0..options.len())
-        .map(|i| ui.painter().layout_no_wrap(label(i), theme::semibold(13.0), Color32::WHITE).size().x + 2.0 * PAD)
-        .collect();
+    let text: Vec<f32> = (0..options.len()).map(|i| ui.painter().layout_no_wrap(label(i), theme::semibold(13.0), Color32::WHITE).size().x).collect();
     let gaps = INSET * 2.0 + GAP * options.len().saturating_sub(1) as f32;
+    // Labels too long for the line (a long language): less padding first, overflow last.
+    let room = (ui.available_width() - gaps - text.iter().sum::<f32>()) / (2 * options.len()) as f32;
+    let pad = room.clamp(MIN_PAD, PAD);
+    let natural: Vec<f32> = text.iter().map(|t| t + 2.0 * pad).collect();
     let needed = natural.iter().sum::<f32>() + gaps;
     let width = ui.available_width().max(needed);
     let extra = (width - needed) / options.len() as f32;

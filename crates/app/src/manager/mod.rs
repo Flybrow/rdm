@@ -82,11 +82,14 @@ pub struct AddRequest {
     /// The user's answer for this download when its file already exists (else the settings').
     #[serde(skip)]
     pub existing: Option<ExistingFile>,
+    /// Shown to the user only because its file already exists (not a browser download to confirm).
+    #[serde(skip)]
+    pub existing_only: bool,
 }
 
 impl AddRequest {
     pub fn from_url(url: Url) -> Self {
-        Self { url, audio_url: None, filename: None, referrer: None, cookies: None, user_agent: None, existing: None }
+        Self { url, audio_url: None, filename: None, referrer: None, cookies: None, user_agent: None, existing: None, existing_only: false }
     }
 
     /// The request behind a download of the list, from its link and headers.
@@ -985,7 +988,7 @@ impl Manager {
             .is_some_and(|n| self.with_settings(|s| s.target_dir(&n)).join(&n).is_file());
         // Without confirmation, still asked when the file is already there (`ExistingFile::Ask`).
         if confirm || (ask && exists) {
-            self.wait_for_answer(req);
+            self.wait_for_answer(AddRequest { existing_only: !confirm, ..req });
         } else {
             self.add(req);
         }
@@ -1014,7 +1017,7 @@ impl Manager {
         let name = req.filename.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(engine::sanitize_file_name);
         let (confirming, ask) = self.with_settings(|s| (s.confirm_browser, s.existing == ExistingFile::Ask));
         let exists = name.as_deref().is_some_and(|n| self.with_settings(|s| s.target_dir(n)).join(n).is_file());
-        Some(ToConfirm { url: req.url.clone(), name, ask_existing: ask && exists, confirming, waiting: waiting.len() })
+        Some(ToConfirm { url: req.url.clone(), name, ask_existing: ask && exists, confirming: confirming && !req.existing_only, waiting: waiting.len() })
     }
 
     /// The user answered for the first waiting download: `download` it or not, with `existing`
@@ -1092,6 +1095,7 @@ impl Manager {
             drop(entries);
             let mut req = AddRequest::from_parts(e.download.url.clone(), e.download.audio.clone(), &e.headers);
             req.filename = Some(final_name);
+            req.existing_only = true;
             self.wait_for_answer(req);
             self.changed();
             return;

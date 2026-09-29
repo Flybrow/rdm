@@ -473,7 +473,8 @@ mod imp {
         let mut found = Vec::new();
         for dir in subdirs(&home.join(".config")) {
             for profile in std::iter::once(dir.clone()).chain(subdirs(&dir)) {
-                if profile.join("Local State").is_file() {
+                // Electron applications (VS Code, Discord…) keep a `Local State` too, not a `Default` profile.
+                if profile.join("Local State").is_file() && profile.join("Default").is_dir() {
                     found.push((profile.join("NativeMessagingHosts"), false));
                 }
             }
