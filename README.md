@@ -114,7 +114,8 @@ Where to look, one concern per file:
 | `app/src/manager/` | The application service: `mod.rs` (queues, scheduling, ticker), `add.rs` (new downloads), `entry.rs` (a download of the list), `files.rs` (names on disk), `routes.rs` (proxy, clients, logins), `online.rs` (updates, VirusTotal), `browsers.rs`, `recording.rs`, `checksum.rs`, `clipboard.rs` |
 | `app/src/bridge.rs` · `local.rs` · `native.rs` | The local bridge and who may use it, the browsers' native connector |
 | `app/src/settings.rs` · `secrets.rs` · `i18n.rs` | Settings files, encrypted passwords, the 16 languages |
-| `app/src/update.rs` · `virustotal.rs` · `ytdlp.rs` · `extension.rs` | Signed updates, VirusTotal, the YouTube module, the bundled extension |
+| `app/src/update/` | Updates: `mod.rs` (the check, how RDM was installed), `package.rs` (download, SHA-256, Ed25519 signature), `install.rs` (Windows assistant, Linux binary or package) |
+| `app/src/virustotal.rs` · `ytdlp.rs` · `extension.rs` | VirusTotal, the YouTube module, the bundled extension |
 | `app/src/ui/` | The egui interface: `theme` → `widgets` → `chrome` (sidebar, header, dashboard), `card` (the list), `dialogs/`, `toast` |
 
 ## VirusTotal
