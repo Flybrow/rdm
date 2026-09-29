@@ -77,6 +77,23 @@ fn section(ui: &mut Ui, p: &Palette, glyph: &str, title: &str, add: impl FnOnce(
     ui.add_space(12.0);
 }
 
+/// What downloading without confirmation risks: a site can then drop files in the download folder
+/// unseen, and the browser's own check of dangerous files ("this file may harm your computer")
+/// does not run, RDM taking the download over first. RDM never opens a file by itself.
+fn unconfirmed_warning(ui: &mut Ui, p: &Palette) {
+    widgets::icon_text(
+        ui,
+        icon::WARNING,
+        p.warning,
+        tr!(
+            "Prudence : un site malveillant pourra alors déposer des fichiers dans votre dossier sans que vous le voyiez, sans l'avertissement « fichier dangereux » du navigateur. RDM n'ouvre jamais un fichier tout seul : n'ouvrez que ceux que vous attendiez.",
+            "Caution: a malicious site could then drop files in your folder without you seeing it, without the browser's \"dangerous file\" warning. RDM never opens a file by itself: only open the ones you expected."
+        ),
+        p.muted,
+        12.0,
+    );
+}
+
 /// Grey explanatory text under a setting.
 fn note(ui: &mut Ui, p: &Palette, text: &str) {
     ui.add(Label::new(RichText::new(text).font(theme::regular(12.0)).color(p.muted)).wrap());
@@ -371,8 +388,15 @@ impl App<'_> {
                     ui,
                     &mut self.confirm_always,
                     tr!("Ne plus demander", "Don't ask again"),
-                    tr!("Réactivable dans les paramètres", "Can be turned back on in the settings"),
+                    tr!(
+                        "Les nouveaux téléchargements se lanceront sans message de confirmation. Réactivable depuis les paramètres.",
+                        "New downloads will start without a confirmation message. Can be turned back on in the settings."
+                    ),
                 );
+                if self.confirm_always {
+                    ui.add_space(6.0);
+                    unconfirmed_warning(ui, &p);
+                }
             }
             ui.add_space(16.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -610,6 +634,10 @@ fn settings_form(
                     tr!("Confirmer les téléchargements du navigateur", "Confirm downloads from the browser"),
                     tr!("RDM passe au premier plan et attend votre accord", "RDM comes to the front and waits for your go-ahead"),
                 );
+                if !s.confirm_browser {
+                    ui.add_space(4.0);
+                    unconfirmed_warning(ui, p);
+                }
             });
 
             section(ui, p, icon::FILE_ARROW_DOWN, tr!("Types de fichiers capturés", "Captured file types"), |ui| {
