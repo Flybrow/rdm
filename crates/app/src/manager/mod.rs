@@ -51,6 +51,8 @@ const RECORDING_IDLE: Duration = Duration::from_secs(120);
 const NAME_TIMEOUT: Duration = Duration::from_secs(10);
 /// The same link sent again within this window is the same request (double click, page retrying).
 const DUPLICATE_WINDOW: Duration = Duration::from_secs(5);
+/// Browser downloads waiting for the user's go-ahead at most (the rest are dropped).
+const MAX_TO_CONFIRM: usize = 50;
 /// Transient failures (network down, server busy) are retried on their own this many times in a
 /// row without progress — about half an hour — before the download is reported as failed.
 const AUTO_RETRIES: u32 = 15;
@@ -830,8 +832,6 @@ impl Manager {
         })
     }
 
-    /// Shows the download in the list at once; without a name from the page, the server is asked
-    /// for the real one in the background (bounded), and the download starts right after.
     /// A download from the browser extension: added at once, or first shown in the (raised)
     /// window for the user's go-ahead, as the settings say.
     pub fn add_from_browser(self: &Arc<Self>, req: AddRequest) {
@@ -842,6 +842,9 @@ impl Manager {
             let mut waiting = lock(&self.to_confirm);
             if waiting.iter().any(|w| w.url == req.url) {
                 return; // the very same link, just sent twice
+            }
+            if waiting.len() >= MAX_TO_CONFIRM {
+                return; // a page flooding the extension: the user has enough to answer already
             }
             waiting.push_back(req);
         }
@@ -879,6 +882,8 @@ impl Manager {
         self.repaint();
     }
 
+    /// Shows the download in the list at once; without a name from the page, the server is asked
+    /// for the real one in the background (bounded), and the download starts right after.
     pub fn add(self: &Arc<Self>, req: AddRequest) {
         let headers = req.headers();
         let given = req.filename.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(engine::sanitize_file_name);
