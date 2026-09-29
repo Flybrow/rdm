@@ -125,6 +125,23 @@ pub fn progress(ui: &Ui, rect: Rect, fraction: Option<f32>, (from, to): (Color32
     }
 }
 
+/// Finished pieces that follow each other, as one: the engine keeps every piece it ever split off
+/// (dozens on a fast line), while only those still downloading need a place of their own.
+pub fn merge_finished(mut pieces: Vec<domain::Segment>) -> Vec<domain::Segment> {
+    pieces.sort_unstable_by_key(|s| s.start);
+    let mut merged: Vec<domain::Segment> = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        match merged.last_mut() {
+            Some(last) if last.is_done() && piece.is_done() && last.end.saturating_add(1) == piece.start => {
+                last.end = piece.end;
+                last.pos = piece.pos.max(piece.end.saturating_add(1));
+            }
+            _ => merged.push(piece),
+        }
+    }
+    merged
+}
+
 /// The bar of a download split across connections: each piece at its place in the file, filled
 /// as far as its connection got, with a thin gap between pieces and a glow at the head of each
 /// piece still downloading.
@@ -486,5 +503,15 @@ mod tests {
         assert_eq!(duration(59), "59 s");
         assert_eq!(duration(125), "2 min 05 s");
         assert_eq!(duration(7260), "2 h 01 min");
+    }
+
+    #[test]
+    fn finished_neighbours_are_one_piece() {
+        use domain::Segment;
+        let done = |start, end| Segment { start, pos: end + 1, end };
+        let running = Segment { start: 30, pos: 35, end: 39 };
+        // Out of order, as the engine lists them (split pieces come last).
+        let merged = super::merge_finished(vec![done(20, 29), done(0, 9), running, done(10, 19), done(40, 49)]);
+        assert_eq!(merged, vec![done(0, 29), running, done(40, 49)]);
     }
 }

@@ -185,28 +185,37 @@ pub fn flavour_of(exe: &Path) -> Option<Flavour> {
 
 /// The browsers of this computer: those Windows lists as installed (any browser, known here or
 /// not), the well-known ones found where they usually are, and those the user added (`custom`).
+/// One browser per key, the first found: two of the same key (Firefox and Firefox Developer
+/// Edition are both `firefox`) would otherwise take each other's place at every call, each time a
+/// new (leaked) `Info`.
 pub fn installed(custom: &[PathBuf]) -> Vec<Browser> {
     let mut list: Vec<Browser> = Vec::new();
-    let mut add = |b: Browser| {
-        if !list.contains(&b) {
-            list.push(b);
-        }
-    };
+    let listed = |list: &[Browser], key: &str| list.iter().any(|b| b.key() == key);
     for (name, exe) in imp::registered() {
         let key = key_of(&name);
         if valid_key(&key)
+            && !listed(&list, &key)
             && let Some(flavour) = flavour_of(&exe)
         {
-            add(Browser::with(&key, Some(&name), Some(flavour), Some(exe)));
+            list.push(Browser::with(&key, Some(&name), Some(flavour), Some(exe)));
         }
     }
     for (key, ..) in KNOWN {
-        let b = Browser::with(key, None, None, None);
-        if b.find().is_some() {
-            add(b);
+        if !listed(&list, key) {
+            let b = Browser::with(key, None, None, None);
+            if b.find().is_some() {
+                list.push(b);
+            }
         }
     }
-    custom.iter().filter_map(|exe| Browser::at(exe)).for_each(add);
+    for exe in custom {
+        let key = exe.file_stem().map(|s| key_of(&s.to_string_lossy())).unwrap_or_default();
+        if !listed(&list, &key)
+            && let Some(b) = Browser::at(exe)
+        {
+            list.push(b);
+        }
+    }
     list
 }
 

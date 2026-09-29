@@ -992,26 +992,29 @@ impl Manager {
             .is_some_and(|n| self.with_settings(|s| s.target_dir(&n)).join(&n).is_file());
         // Without confirmation, still asked when the file is already there (`ExistingFile::Ask`).
         if confirm || (ask && exists) {
-            self.wait_for_answer(AddRequest { existing_only: !confirm, ..req });
+            // No room left to ask: a page flooding the extension, the user has enough to answer.
+            let _ = self.wait_for_answer(AddRequest { existing_only: !confirm, ..req });
         } else {
             self.add(req);
         }
     }
 
-    /// Shown in the (raised) window until the user answers (see `to_confirm`).
-    fn wait_for_answer(&self, req: AddRequest) {
+    /// Shown in the (raised) window until the user answers (see `to_confirm`). `Err`: no room left
+    /// to ask (`MAX_TO_CONFIRM`), the request comes back.
+    fn wait_for_answer(&self, req: AddRequest) -> Result<(), Box<AddRequest>> {
         {
             let mut waiting = lock(&self.to_confirm);
             if waiting.iter().any(|w| w.url == req.url) {
-                return; // the very same link, just sent twice
+                return Ok(()); // the very same link, just sent twice
             }
             if waiting.len() >= MAX_TO_CONFIRM {
-                return; // a page flooding the extension: the user has enough to answer already
+                return Err(Box::new(req));
             }
             waiting.push_back(req);
         }
         self.show();
         self.repaint();
+        Ok(())
     }
 
     /// The first download waiting for the user's answer.
@@ -1084,7 +1087,7 @@ impl Manager {
     /// The server's name for a new download (if it gave one): its target follows, unless it
     /// already started meanwhile. Either way it may start now — or, when a file of that name
     /// exists and the settings say to skip it, it goes away.
-    fn resolved(&self, id: DownloadId, name: Option<String>) {
+    fn resolved(self: &Arc<Self>, id: DownloadId, name: Option<String>) {
         let settings = self.settings();
         let mut entries = lock(&self.entries);
         let Some(i) = entries.iter().position(|e| e.download.id == id) else { return };
@@ -1100,7 +1103,10 @@ impl Manager {
             let mut req = AddRequest::from_parts(e.download.url.clone(), e.download.audio.clone(), &e.headers);
             req.filename = Some(final_name);
             req.existing_only = true;
-            self.wait_for_answer(req);
+            // Too many questions already: not lost, downloaded under a new name.
+            if let Err(req) = self.wait_for_answer(req) {
+                self.add(AddRequest { existing: Some(ExistingFile::Rename), existing_only: false, ..*req });
+            }
             self.changed();
             return;
         }
