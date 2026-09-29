@@ -17,6 +17,7 @@ mod ui;
 mod update;
 mod virustotal;
 mod window;
+mod ytdlp;
 
 use std::time::Duration;
 

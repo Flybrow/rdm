@@ -8,7 +8,7 @@ repository.workspace = true
 [dependencies]
 domain.workspace = true
 engine.workspace = true
-tokio = { workspace = true, features = ["signal"] }
+tokio = { workspace = true, features = ["signal", "process"] }
 serde.workspace = true
 serde_json.workspace = true
 url.workspace = true
@@ -29,6 +29,8 @@ opener = { version = "0.8", features = ["reveal"] }
 sha2 = "0.11"
 md-5 = "0.11"
 sha1 = "0.11"
+# YouTube module (see `ytdlp`): Deno and bgutil come as zip archives.
+zip = { version = "8", default-features = false, features = ["deflate"] }
 # Update packages are signed (Ed25519) by the release workflow; RDM checks before installing.
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 # Interface language from the system.

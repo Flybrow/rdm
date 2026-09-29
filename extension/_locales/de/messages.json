@@ -49,5 +49,14 @@
   "noStream": { "message": "Kein Stream erkannt — starten Sie die Wiedergabe und versuchen Sie es dann erneut." },
   "detectedVideos": { "message": "Erkannte Videos" },
   "hlsName": { "message": "$1 (HLS-Stream)" },
-  "sizeUnits": { "message": "B KB MB GB" }
+  "sizeUnits": { "message": "B KB MB GB" },
+  "ytModule": { "message": "YouTube-Modul (Anti-Bot-Token)" },
+  "ytModuleInstall": { "message": "YouTube-Modul von RDM installieren" },
+  "ytModuleDetail": { "message": "Einmaliger Download von etwa 300 MB (yt-dlp, Deno, bgutil): besteht die Anti-Bot-Prüfung von YouTube" },
+  "ytModuleInstalling": { "message": "YouTube-Modul wird installiert… öffne dieses Menü in ein paar Minuten erneut." },
+  "ytModuleFailed": { "message": "Installation des YouTube-Moduls fehlgeschlagen: $1" },
+  "ytModuleResolving": { "message": "Anti-Bot-Token wird abgerufen…" },
+  "ytModuleError": { "message": "YouTube-Modul: $1" },
+  "ytModuleStarting": { "message": "Installation wird gestartet…" },
+  "ytModuleReady": { "message": "YouTube-Modul bereit: öffne dieses Menü erneut." }
 }

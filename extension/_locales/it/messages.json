@@ -49,5 +49,14 @@
   "noStream": { "message": "Nessun flusso rilevato — avvia la riproduzione, poi riprova." },
   "detectedVideos": { "message": "Video rilevati" },
   "hlsName": { "message": "$1 (flusso HLS)" },
-  "sizeUnits": { "message": "B KB MB GB" }
+  "sizeUnits": { "message": "B KB MB GB" },
+  "ytModule": { "message": "Modulo YouTube (token anti-bot)" },
+  "ytModuleInstall": { "message": "Installa il modulo YouTube di RDM" },
+  "ytModuleDetail": { "message": "Download unico di circa 300 MB (yt-dlp, Deno, bgutil): supera il controllo anti-bot di YouTube" },
+  "ytModuleInstalling": { "message": "Installazione del modulo YouTube… riapri questo menu tra qualche minuto." },
+  "ytModuleFailed": { "message": "Installazione del modulo YouTube non riuscita: $1" },
+  "ytModuleResolving": { "message": "Recupero del token anti-bot…" },
+  "ytModuleError": { "message": "Modulo YouTube: $1" },
+  "ytModuleStarting": { "message": "Avvio dell'installazione…" },
+  "ytModuleReady": { "message": "Modulo YouTube pronto: riapri questo menu." }
 }

@@ -49,5 +49,14 @@
   "noStream": { "message": "ストリームが検出されません — 再生を開始してから、もう一度お試しください。" },
   "detectedVideos": { "message": "検出された動画" },
   "hlsName": { "message": "$1（HLS ストリーム）" },
-  "sizeUnits": { "message": "B KB MB GB" }
+  "sizeUnits": { "message": "B KB MB GB" },
+  "ytModule": { "message": "YouTube モジュール（ボット対策トークン）" },
+  "ytModuleInstall": { "message": "RDM の YouTube モジュールをインストール" },
+  "ytModuleDetail": { "message": "約 300 MB の一回限りのダウンロード（yt-dlp、Deno、bgutil）：YouTube のボット対策チェックを通過します" },
+  "ytModuleInstalling": { "message": "YouTube モジュールをインストール中… 数分後にこのメニューを開き直してください。" },
+  "ytModuleFailed": { "message": "YouTube モジュールのインストールに失敗しました：$1" },
+  "ytModuleResolving": { "message": "ボット対策トークンを取得中…" },
+  "ytModuleError": { "message": "YouTube モジュール：$1" },
+  "ytModuleStarting": { "message": "インストールを開始しています…" },
+  "ytModuleReady": { "message": "YouTube モジュールの準備ができました：このメニューを開き直してください。" }
 }

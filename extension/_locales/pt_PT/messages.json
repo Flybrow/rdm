@@ -49,5 +49,14 @@
   "noStream": { "message": "Nenhum fluxo detectado — inicie a reprodução e tente novamente." },
   "detectedVideos": { "message": "Vídeos detectados" },
   "hlsName": { "message": "$1 (fluxo HLS)" },
-  "sizeUnits": { "message": "B KB MB GB" }
+  "sizeUnits": { "message": "B KB MB GB" },
+  "ytModule": { "message": "Módulo do YouTube (token antirrobô)" },
+  "ytModuleInstall": { "message": "Instalar o módulo do YouTube do RDM" },
+  "ytModuleDetail": { "message": "Transferência única de cerca de 300 MB (yt-dlp, Deno, bgutil): passa a verificação antirrobô do YouTube" },
+  "ytModuleInstalling": { "message": "A instalar o módulo do YouTube… reabra este menu dentro de alguns minutos." },
+  "ytModuleFailed": { "message": "Falha na instalação do módulo do YouTube: $1" },
+  "ytModuleResolving": { "message": "A obter o token antirrobô…" },
+  "ytModuleError": { "message": "Módulo do YouTube: $1" },
+  "ytModuleStarting": { "message": "A iniciar a instalação…" },
+  "ytModuleReady": { "message": "Módulo do YouTube pronto: reabra este menu." }
 }

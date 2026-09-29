@@ -140,10 +140,11 @@ If RDM is closed, the browser downloads normally.
 
 ### YouTube
 
-The ⬇ menu offers two methods, tested end to end in a real browser:
+The ⬇ menu offers these methods:
 
 1. **Direct download** (a few seconds): the extension asks YouTube's player API from the page, with the browser's session, through several client profiles. RDM **checks every link, from the first to the last byte**, before showing it: YouTube sometimes serves the start of a file then refuses the rest (403) when its anti-bot token is missing. Only fully downloadable links are offered, with picture and sound merged without re-encoding.
-2. **Recording** (always available, about half the video's duration): the page reloads in recording mode, the video plays muted at 2× (YouTube's own speed setting), in the best quality, and RDM receives exactly the data YouTube's player receives. No token is forged and no protection is bypassed. Ads are not recorded. A banner shows the progress and can cancel.
+2. **YouTube module** (optional, when YouTube refuses the direct links): installed on request from the menu, once (about 300 MB in the user's own data folder, no administrator rights): [yt-dlp](https://github.com/yt-dlp/yt-dlp), [Deno](https://deno.com) for YouTube's JavaScript challenges and [bgutil](https://github.com/Brainicism/bgutil-ytdlp-pot-provider), which generates YouTube's anti-bot (proof-of-origin) token locally. Every file is checked against its published SHA-256. yt-dlp only resolves the links; RDM verifies and downloads them like the others.
+3. **Recording** (always available, about half the video's duration): the page reloads in recording mode, the video plays muted at 2× (YouTube's own speed setting), in the best quality, and RDM receives exactly the data YouTube's player receives. No token is forged and no protection is bypassed. Ads are not recorded. A banner shows the progress and can cancel.
 
 Not supported: DRM content (Netflix, Widevine, FairPlay) and merging WebM streams (VP9/Opus). Recording forces the player to MP4 (H.264/AV1 + AAC).
 

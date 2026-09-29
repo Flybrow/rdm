@@ -49,5 +49,14 @@
   "noStream": { "message": "Nie wykryto strumienia — rozpocznij odtwarzanie, a następnie spróbuj ponownie." },
   "detectedVideos": { "message": "Wykryte filmy" },
   "hlsName": { "message": "$1 (strumień HLS)" },
-  "sizeUnits": { "message": "B KB MB GB" }
+  "sizeUnits": { "message": "B KB MB GB" },
+  "ytModule": { "message": "Moduł YouTube (token antybotowy)" },
+  "ytModuleInstall": { "message": "Zainstaluj moduł YouTube RDM" },
+  "ytModuleDetail": { "message": "Jednorazowe pobranie ok. 300 MB (yt-dlp, Deno, bgutil): przechodzi kontrolę antybotową YouTube" },
+  "ytModuleInstalling": { "message": "Instalowanie modułu YouTube… otwórz to menu ponownie za kilka minut." },
+  "ytModuleFailed": { "message": "Instalacja modułu YouTube nie powiodła się: $1" },
+  "ytModuleResolving": { "message": "Pobieranie tokenu antybotowego…" },
+  "ytModuleError": { "message": "Moduł YouTube: $1" },
+  "ytModuleStarting": { "message": "Rozpoczynanie instalacji…" },
+  "ytModuleReady": { "message": "Moduł YouTube gotowy: otwórz to menu ponownie." }
 }

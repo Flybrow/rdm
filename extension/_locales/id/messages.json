@@ -49,5 +49,14 @@
   "noStream": { "message": "Tidak ada aliran terdeteksi — mulai pemutaran, lalu coba lagi." },
   "detectedVideos": { "message": "Video terdeteksi" },
   "hlsName": { "message": "$1 (aliran HLS)" },
-  "sizeUnits": { "message": "B KB MB GB" }
+  "sizeUnits": { "message": "B KB MB GB" },
+  "ytModule": { "message": "Modul YouTube (token anti-bot)" },
+  "ytModuleInstall": { "message": "Pasang modul YouTube RDM" },
+  "ytModuleDetail": { "message": "Unduhan satu kali sekitar 300 MB (yt-dlp, Deno, bgutil): melewati pemeriksaan anti-bot YouTube" },
+  "ytModuleInstalling": { "message": "Memasang modul YouTube… buka kembali menu ini dalam beberapa menit." },
+  "ytModuleFailed": { "message": "Pemasangan modul YouTube gagal: $1" },
+  "ytModuleResolving": { "message": "Mengambil token anti-bot…" },
+  "ytModuleError": { "message": "Modul YouTube: $1" },
+  "ytModuleStarting": { "message": "Memulai pemasangan…" },
+  "ytModuleReady": { "message": "Modul YouTube siap: buka kembali menu ini." }
 }

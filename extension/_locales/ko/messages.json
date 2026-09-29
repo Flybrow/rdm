@@ -49,5 +49,14 @@
   "noStream": { "message": "감지된 스트림이 없습니다 — 재생을 시작한 다음 다시 시도하세요." },
   "detectedVideos": { "message": "감지된 동영상" },
   "hlsName": { "message": "$1(HLS 스트림)" },
-  "sizeUnits": { "message": "B KB MB GB" }
+  "sizeUnits": { "message": "B KB MB GB" },
+  "ytModule": { "message": "YouTube 모듈(봇 방지 토큰)" },
+  "ytModuleInstall": { "message": "RDM YouTube 모듈 설치" },
+  "ytModuleDetail": { "message": "약 300MB 1회 다운로드(yt-dlp, Deno, bgutil): YouTube 봇 확인을 통과합니다" },
+  "ytModuleInstalling": { "message": "YouTube 모듈 설치 중… 몇 분 후 이 메뉴를 다시 여세요." },
+  "ytModuleFailed": { "message": "YouTube 모듈 설치 실패: $1" },
+  "ytModuleResolving": { "message": "봇 방지 토큰 가져오는 중…" },
+  "ytModuleError": { "message": "YouTube 모듈: $1" },
+  "ytModuleStarting": { "message": "설치 시작 중…" },
+  "ytModuleReady": { "message": "YouTube 모듈 준비 완료: 이 메뉴를 다시 여세요." }
 }

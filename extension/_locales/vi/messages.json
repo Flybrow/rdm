@@ -49,5 +49,14 @@
   "noStream": { "message": "Không phát hiện luồng nào — hãy bắt đầu phát rồi thử lại." },
   "detectedVideos": { "message": "Video được phát hiện" },
   "hlsName": { "message": "$1 (luồng HLS)" },
-  "sizeUnits": { "message": "B KB MB GB" }
+  "sizeUnits": { "message": "B KB MB GB" },
+  "ytModule": { "message": "Mô-đun YouTube (mã chống bot)" },
+  "ytModuleInstall": { "message": "Cài đặt mô-đun YouTube của RDM" },
+  "ytModuleDetail": { "message": "Tải xuống một lần khoảng 300 MB (yt-dlp, Deno, bgutil): vượt qua kiểm tra chống bot của YouTube" },
+  "ytModuleInstalling": { "message": "Đang cài đặt mô-đun YouTube… hãy mở lại menu này sau vài phút." },
+  "ytModuleFailed": { "message": "Cài đặt mô-đun YouTube thất bại: $1" },
+  "ytModuleResolving": { "message": "Đang lấy mã chống bot…" },
+  "ytModuleError": { "message": "Mô-đun YouTube: $1" },
+  "ytModuleStarting": { "message": "Đang bắt đầu cài đặt…" },
+  "ytModuleReady": { "message": "Mô-đun YouTube đã sẵn sàng: hãy mở lại menu này." }
 }

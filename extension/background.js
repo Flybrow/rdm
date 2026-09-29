@@ -303,6 +303,24 @@ async function check(request) {
   return answered(res) && res.ok ? res.json().catch(() => null) : null;
 }
 
+/**
+ * RDM's YouTube module (yt-dlp with its anti-bot token): `{ state }` (`missing`, `installing`,
+ * `ready`, `failed` with `error`), `null` when RDM does not answer.
+ */
+async function youtubeModule(action) {
+  const res = await call(`/youtube/${action === "install" ? "install" : "state"}`, { method: "POST", timeout: 5000 });
+  if (res?.status === UNPAIRED) return "unpaired";
+  return answered(res) && res.ok ? res.json().catch(() => null) : null;
+}
+
+/** A video's links resolved by the module: `{ title, ua, formats }` or `{ error }`. */
+async function youtubeExtract(id) {
+  if (typeof id !== "string" || !/^[\w-]{11}$/.test(id)) return null;
+  const res = await call("/youtube/extract", { method: "POST", body: { id }, timeout: 28_000 });
+  if (res === TIMEOUT) return { error: t("timedOut") };
+  return answered(res) && res.ok ? res.json().catch(() => null) : null;
+}
+
 /** Opens a recording session in RDM for this YouTube page; returns its token (or null). */
 async function recordStart(page, filename) {
   const youtube = /^https:\/\/(www|m)\.youtube\.com\/watch\?/.test(page ?? "");
@@ -457,6 +475,12 @@ ext.runtime.onMessage.addListener((msg, sender, reply) => {
       return true;
     case "check":
       withStore({ ...base, url: msg.url }).then(check).then(reply, () => reply(null));
+      return true;
+    case "yt-module":
+      youtubeModule(msg.action).then(reply, () => reply(null));
+      return true;
+    case "yt-extract":
+      youtubeExtract(msg.id).then(reply, () => reply(null));
       return true;
     case "record-start":
       recordStart(tab?.url, msg.filename).then(reply, () => reply(null));

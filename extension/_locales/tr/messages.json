@@ -49,5 +49,14 @@
   "noStream": { "message": "Akış algılanmadı — oynatmayı başlatın, sonra yeniden deneyin." },
   "detectedVideos": { "message": "Algılanan videolar" },
   "hlsName": { "message": "$1 (HLS akışı)" },
-  "sizeUnits": { "message": "B KB MB GB" }
+  "sizeUnits": { "message": "B KB MB GB" },
+  "ytModule": { "message": "YouTube modülü (bot karşıtı belirteç)" },
+  "ytModuleInstall": { "message": "RDM'nin YouTube modülünü yükle" },
+  "ytModuleDetail": { "message": "Yaklaşık 300 MB'lık tek seferlik indirme (yt-dlp, Deno, bgutil): YouTube'un bot kontrolünü geçer" },
+  "ytModuleInstalling": { "message": "YouTube modülü yükleniyor… bu menüyü birkaç dakika sonra yeniden açın." },
+  "ytModuleFailed": { "message": "YouTube modülü yüklenemedi: $1" },
+  "ytModuleResolving": { "message": "Bot karşıtı belirteç alınıyor…" },
+  "ytModuleError": { "message": "YouTube modülü: $1" },
+  "ytModuleStarting": { "message": "Yükleme başlatılıyor…" },
+  "ytModuleReady": { "message": "YouTube modülü hazır: bu menüyü yeniden açın." }
 }

@@ -56,6 +56,9 @@ pub async fn serve(manager: Arc<Manager>, listener: TcpListener) {
         .route("/show", post(show))
         .route("/quit", post(quit))
         .route("/pair", post(pair))
+        .route("/youtube/state", post(youtube_state))
+        .route("/youtube/install", post(youtube_install))
+        .route("/youtube/extract", post(youtube_extract))
         .route("/record/start", post(record_start))
         .route("/record/{token}/progress", post(record_progress))
         .route("/record/{token}/finish", post(record_finish))
@@ -223,6 +226,46 @@ async fn check(
         _ => Check { ok: false, status: None, size: None },
     };
     Ok(Json(check))
+}
+
+// ── YouTube module (see `ytdlp`): links YouTube refuses to the extension's own clients ─────
+
+async fn youtube_state(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> Result<Json<crate::ytdlp::State>, StatusCode> {
+    guard(&manager, &headers)?;
+    Ok(Json(crate::ytdlp::state()))
+}
+
+/// Starts the module's installation (a few minutes; the extension asks `/youtube/state` later).
+async fn youtube_install(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> Result<Json<crate::ytdlp::State>, StatusCode> {
+    guard(&manager, &headers)?;
+    crate::ytdlp::install(&tokio::runtime::Handle::current());
+    Ok(Json(crate::ytdlp::state()))
+}
+
+#[derive(Deserialize)]
+struct Video {
+    id: String,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum Extracted {
+    Formats(crate::ytdlp::Formats),
+    Refused { error: String },
+}
+
+async fn youtube_extract(State(manager): State<Arc<Manager>>, headers: HeaderMap, Json(v): Json<Video>) -> Result<Json<Extracted>, StatusCode> {
+    guard(&manager, &headers)?;
+    if !crate::ytdlp::valid_id(&v.id) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if crate::ytdlp::state() != crate::ytdlp::State::Ready {
+        return Err(StatusCode::CONFLICT);
+    }
+    Ok(Json(match crate::ytdlp::extract(&v.id).await {
+        Ok(formats) => Extracted::Formats(formats),
+        Err(error) => Extracted::Refused { error },
+    }))
 }
 
 // ── Browser recordings (YouTube): the page's own player feeds the data ──────────────────

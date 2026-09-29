@@ -49,5 +49,14 @@
   "noStream": { "message": "Geen stream gedetecteerd — start het afspelen en probeer het opnieuw." },
   "detectedVideos": { "message": "Gedetecteerde video's" },
   "hlsName": { "message": "$1 (HLS-stream)" },
-  "sizeUnits": { "message": "B KB MB GB" }
+  "sizeUnits": { "message": "B KB MB GB" },
+  "ytModule": { "message": "YouTube-module (anti-bottoken)" },
+  "ytModuleInstall": { "message": "YouTube-module van RDM installeren" },
+  "ytModuleDetail": { "message": "Eenmalige download van ongeveer 300 MB (yt-dlp, Deno, bgutil): komt door de anti-botcontrole van YouTube" },
+  "ytModuleInstalling": { "message": "YouTube-module wordt geïnstalleerd… open dit menu over een paar minuten opnieuw." },
+  "ytModuleFailed": { "message": "Installatie van de YouTube-module mislukt: $1" },
+  "ytModuleResolving": { "message": "Anti-bottoken ophalen…" },
+  "ytModuleError": { "message": "YouTube-module: $1" },
+  "ytModuleStarting": { "message": "Installatie starten…" },
+  "ytModuleReady": { "message": "YouTube-module klaar: open dit menu opnieuw." }
 }

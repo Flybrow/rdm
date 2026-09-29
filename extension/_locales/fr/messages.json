@@ -49,5 +49,14 @@
   "noStream": { "message": "Aucun flux détecté — lancez la lecture, puis réessayez." },
   "detectedVideos": { "message": "Vidéos détectées" },
   "hlsName": { "message": "$1 (flux HLS)" },
-  "sizeUnits": { "message": "o Ko Mo Go" }
+  "sizeUnits": { "message": "o Ko Mo Go" },
+  "ytModule": { "message": "Module YouTube (jeton anti-robot)" },
+  "ytModuleInstall": { "message": "Installer le module YouTube de RDM" },
+  "ytModuleDetail": { "message": "Téléchargement unique d'environ 300 Mo (yt-dlp, Deno, bgutil) : passe le contrôle anti-robot de YouTube" },
+  "ytModuleInstalling": { "message": "Installation du module YouTube… rouvrez ce menu dans quelques minutes." },
+  "ytModuleFailed": { "message": "Échec de l'installation du module YouTube : $1" },
+  "ytModuleResolving": { "message": "Obtention du jeton anti-robot…" },
+  "ytModuleError": { "message": "Module YouTube : $1" },
+  "ytModuleStarting": { "message": "Démarrage de l'installation…" },
+  "ytModuleReady": { "message": "Module YouTube prêt : rouvrez ce menu." }
 }

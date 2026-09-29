@@ -224,6 +224,13 @@
       notes.push(t("linksRefused", c.client, describeRefusal(res)));
     }
 
+    // Refused to the page's clients: RDM's YouTube module (yt-dlp with the anti-bot token).
+    if (!items.length) {
+      const extra = await moduleItems(gen, base, notes);
+      if (!extra) return; // a newer menu took over
+      items.push(...extra);
+    }
+
     // HLS as an alternative (or the only way): listed once RDM could read it.
     for (const c of yt.clients ?? []) {
       if (!c.hls || !isYouTubeMedia(c.hls)) continue;
@@ -240,13 +247,63 @@
     if (yt.drm) {
       items.push(note(t("drm")));
     } else {
-      if (!items.length) items.push(note(t("directRefused")));
+      // Why, in short (the last refusals): otherwise nothing tells a network block from a bug.
+      if (!items.length) items.push(li("note", t("directRefused"), notes.slice(-3).join(" · ")));
       // Always available: records what YouTube's own player receives (see capture.js).
       const minutes = target?.duration ? Math.ceil(target.duration / 2 / 60) : null;
       const detail = t("recordDetail", minutes ? t("aboutMinutes", minutes) : "");
       items.push(section(t("recording")), li("action", `${base}.mp4`, detail, () => startRecording(`${base}.mp4`)));
     }
     show(...items);
+  }
+
+  const videoIdOf = (href) => {
+    const url = new URL(href);
+    const id = url.searchParams.get("v") ?? url.pathname.match(/^\/(?:shorts|live)\/([\w-]{11})/)?.[1];
+    return /^[\w-]{11}$/.test(id ?? "") ? id : null;
+  };
+
+  /**
+   * Items from RDM's YouTube module: its links (verified like the others), or the offer to install
+   * it. `null` when a newer menu took over meanwhile.
+   */
+  async function moduleItems(gen, base, notes) {
+    const id = videoIdOf(location.href);
+    if (!id) return [];
+    const mod = await send({ kind: "yt-module" });
+    if (gen !== generation) return null;
+    if (mod === "unpaired") return [note(UNPAIRED_NOTE)];
+    if (!mod?.state) return [];
+    if (mod.state === "installing") return [note(t("ytModuleInstalling"))];
+    if (mod.state !== "ready") {
+      const offer = [section(t("ytModule")), li("action", t("ytModuleInstall"), t("ytModuleDetail"), installModule)];
+      return mod.state === "failed" ? [note(t("ytModuleFailed", String(mod.error ?? ""))), ...offer] : offer;
+    }
+    show(note(t("ytModuleResolving")));
+    const res = await send({ kind: "yt-extract", id });
+    if (gen !== generation) return null;
+    if (!res) return [];
+    if (!Array.isArray(res.formats)) {
+      notes.push(t("ytModuleError", String(res.error ?? "")));
+      return [];
+    }
+    const formats = res.formats.filter((f) => isYouTubeMedia(f.url));
+    const sample = formats.find((f) => f.audio && !f.video) ?? formats[0];
+    if (!sample) return [];
+    const via = { user_agent: res.ua, bare: true };
+    const checked = await send({ kind: "check", url: sample.url, ...via });
+    if (gen !== generation) return null;
+    if (checked?.ok) return formatItems(formats, base, via);
+    notes.push(t("linksRefused", "yt-dlp", describeRefusal(checked)));
+    return [];
+  }
+
+  async function installModule() {
+    show(note(t("ytModuleStarting")));
+    const mod = await send({ kind: "yt-module", action: "install" });
+    if (mod === "unpaired") return show(note(UNPAIRED_NOTE));
+    if (!mod?.state) return show(note(t("notRunningShort")));
+    show(note(mod.state === "ready" ? t("ytModuleReady") : t("ytModuleInstalling")));
   }
 
   // ── YouTube recording: page reload in recording mode, relay to RDM, progress banner ──

@@ -49,5 +49,14 @@
   "noStream": { "message": "Потік не виявлено — почніть відтворення і повторіть спробу." },
   "detectedVideos": { "message": "Виявлені відео" },
   "hlsName": { "message": "$1 (потік HLS)" },
-  "sizeUnits": { "message": "Б КБ МБ ГБ" }
+  "sizeUnits": { "message": "Б КБ МБ ГБ" },
+  "ytModule": { "message": "Модуль YouTube (антибот-токен)" },
+  "ytModuleInstall": { "message": "Встановити модуль YouTube для RDM" },
+  "ytModuleDetail": { "message": "Одноразове завантаження близько 300 МБ (yt-dlp, Deno, bgutil): проходить антибот-перевірку YouTube" },
+  "ytModuleInstalling": { "message": "Встановлення модуля YouTube… відкрийте це меню знову за кілька хвилин." },
+  "ytModuleFailed": { "message": "Не вдалося встановити модуль YouTube: $1" },
+  "ytModuleResolving": { "message": "Отримання антибот-токена…" },
+  "ytModuleError": { "message": "Модуль YouTube: $1" },
+  "ytModuleStarting": { "message": "Запуск встановлення…" },
+  "ytModuleReady": { "message": "Модуль YouTube готовий: відкрийте це меню знову." }
 }
