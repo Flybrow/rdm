@@ -74,6 +74,9 @@ pub enum EngineError {
     Empty,
     #[error("connection closed before the end")]
     Truncated,
+    /// A connection stopped receiving while the others did: its piece goes to another one.
+    #[error("connection stalled")]
+    Stalled,
     #[error("blocked: Internet content pointing into the local network")]
     LocalNetwork,
     #[error("playlist: {0}")]
@@ -123,8 +126,17 @@ impl EngineError {
                     || net::is_lan_blocked(e)
             }
             Self::Io(_) | Self::Empty | Self::LocalNetwork | Self::Playlist(_) | Self::Mux(_) => true,
-            Self::RangeIgnored | Self::Truncated => false,
+            Self::RangeIgnored | Self::Truncated | Self::Stalled => false,
         }
+    }
+}
+
+/// How long a server asks to wait before the next request (`Retry-After`: seconds, or a date).
+pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
+    let value = headers.get(header::RETRY_AFTER)?.to_str().ok()?.trim();
+    match value.parse::<u64>() {
+        Ok(secs) => Some(Duration::from_secs(secs)),
+        Err(_) => httpdate::parse_http_date(value).ok()?.duration_since(std::time::SystemTime::now()).ok(),
     }
 }
 
@@ -292,6 +304,18 @@ pub(crate) fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_retry_after() {
+        let with = |v: &str| HeaderMap::from_iter([(header::RETRY_AFTER, HeaderValue::from_str(v).unwrap())]);
+        assert_eq!(retry_after(&with("10")), Some(Duration::from_secs(10)));
+        assert_eq!(retry_after(&with(" 3 ")), Some(Duration::from_secs(3)));
+        let later = httpdate::fmt_http_date(std::time::SystemTime::now() + Duration::from_secs(120));
+        assert!(retry_after(&with(&later)).is_some_and(|d| d > Duration::from_secs(100)));
+        assert_eq!(retry_after(&with("Wed, 21 Oct 2015 07:28:00 GMT")), None, "a date in the past: no wait");
+        assert_eq!(retry_after(&with("soon")), None);
+        assert_eq!(retry_after(&HeaderMap::new()), None);
+    }
 
     #[test]
     fn every_proxy_kind_builds_with_or_without_a_login() {

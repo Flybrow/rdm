@@ -35,6 +35,9 @@ const EXE: &str = std::env::consts::EXE_SUFFIX;
 
 const MAX_FILE: u64 = 400 << 20;
 const EXTRACT_TIMEOUT: Duration = Duration::from_secs(25);
+/// Extractions at once, and how long one waits for its turn.
+const MAX_EXTRACTIONS: usize = 2;
+const WAIT_TURN: Duration = Duration::from_secs(3);
 const SETUP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// Written last: the module is complete.
 const READY: &str = "ready";
@@ -282,6 +285,13 @@ pub async fn extract(id: &str) -> Result<Formats, String> {
     if !valid_id(id) {
         return Err("invalid video".into());
     }
+    // yt-dlp and Deno take hundreds of megabytes each: a menu opened again and again must not
+    // start them by the dozen.
+    static RUNNING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MAX_EXTRACTIONS);
+    let _turn = match tokio::time::timeout(WAIT_TURN, RUNNING.acquire()).await {
+        Ok(Ok(permit)) => permit,
+        _ => return Err("the YouTube module is busy: try again in a moment".into()),
+    };
     let dir = tools_dir().ok_or("no user data folder")?;
     let p = paths(&dir);
     let mut jsrt = p.deno.into_os_string();

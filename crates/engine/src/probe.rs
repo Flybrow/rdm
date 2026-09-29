@@ -1,7 +1,17 @@
-use reqwest::{Client, StatusCode, header::{self, HeaderMap}};
+use std::time::Duration;
+
+use reqwest::{
+    Client, Response, StatusCode,
+    header::{self, HeaderMap, HeaderValue},
+};
 use url::Url;
 
 use crate::EngineError;
+
+/// The identity tried when a server cuts off the browser-like one: some servers (mirrors,
+/// speed-test hosts) drop any "Mozilla/…" User-Agent that does not come from a real browser, and
+/// take the common download tools'.
+pub const FALLBACK_AGENT: &str = "Wget/1.25.0";
 
 #[derive(Debug, Clone)]
 pub struct Probe {
@@ -13,6 +23,9 @@ pub struct Probe {
     /// What identifies this version of the file on the server (`Last-Modified`, else a strong
     /// `ETag`): a download resumed later must continue the same file, not a newer one.
     pub version: Option<String>,
+    /// The User-Agent the server accepted after refusing the one asked for: every request of the
+    /// download must then use it.
+    pub agent: Option<HeaderValue>,
 }
 
 /// The file's version as the server states it. `Last-Modified` first: it stays the same across
@@ -37,35 +50,103 @@ fn version_of(headers: &HeaderMap) -> Option<String> {
 /// Attempts for the initial request: transient failures (timeout, reset, 5xx, 429) are retried.
 const PROBE_ATTEMPTS: u32 = 5;
 
+/// Longest wait between two attempts when the server asks for one (`Retry-After`).
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// Below this, a file comes as fast on one connection: no extra request to learn about parts.
+const WORTH_PARTS: u64 = 4 << 20;
+
+/// What the first request of a download asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    /// `bytes=0-0`: the facts only (size, range support, name).
+    Facts,
+    /// `bytes=0-`: the facts, and the answer kept — its body is the file from its first byte.
+    Data,
+}
+
 /// One `Range: bytes=0-0` request reveals size, range support and file name at once.
 pub async fn probe(client: &Client, url: &Url, headers: &HeaderMap) -> Result<Probe, EngineError> {
-    let mut attempt = 1;
+    first(client, url, headers, Ask::Facts).await.map(|(probe, _)| probe)
+}
+
+/// A download's first request: the facts, and the answer to read the file from — no second
+/// request for its first bytes (one round trip less, and one request less for a server that
+/// counts them). `None` for the answer when there is nothing to read (an empty file).
+pub(crate) async fn open(client: &Client, url: &Url, headers: &HeaderMap) -> Result<(Probe, Option<Response>), EngineError> {
+    first(client, url, headers, Ask::Data).await
+}
+
+async fn first(client: &Client, url: &Url, headers: &HeaderMap, ask: Ask) -> Result<(Probe, Option<Response>), EngineError> {
+    let (mut attempt, mut other_tried) = (1, false);
     loop {
-        match try_probe(client, url, headers).await {
-            Err(e) if !e.is_permanent() && attempt < PROBE_ATTEMPTS => attempt += 1,
-            other => return other,
+        let (err, retry_after) = match attempt_probe(client, url, headers, ask).await {
+            Ok(found) => return Ok(found),
+            Err(failure) => failure,
+        };
+        if !other_tried && refused_identity(&err) {
+            other_tried = true;
+            if let Some(found) = with_other_agent(client, url, headers, ask).await {
+                return Ok(found);
+            }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500 << attempt)).await;
+        if err.is_permanent() || attempt >= PROBE_ATTEMPTS {
+            return Err(err);
+        }
+        attempt += 1;
+        let wait = Duration::from_millis(500 << attempt).max(retry_after.unwrap_or_default().min(MAX_RETRY_AFTER));
+        tokio::time::sleep(wait).await;
     }
 }
 
 /// A single attempt, for when an answer is only nice to have (naming a new download quickly).
 pub async fn probe_once(client: &Client, url: &Url, headers: &HeaderMap) -> Result<Probe, EngineError> {
-    try_probe(client, url, headers).await
+    match attempt_probe(client, url, headers, Ask::Facts).await {
+        Ok((probe, _)) => Ok(probe),
+        Err((e, _)) if refused_identity(&e) => with_other_agent(client, url, headers, Ask::Facts).await.map(|(probe, _)| probe).ok_or(e),
+        Err((e, _)) => Err(e),
+    }
 }
 
-async fn try_probe(client: &Client, url: &Url, headers: &HeaderMap) -> Result<Probe, EngineError> {
+/// Whether the server may have refused the identity rather than the request: 403/406, or the
+/// connection dropped before any answer (neither a timeout nor a failed connection).
+fn refused_identity(err: &EngineError) -> bool {
+    let EngineError::Http(e) = err else { return false };
+    match e.status() {
+        Some(status) => matches!(status.as_u16(), 403 | 406),
+        None => e.is_request() && !e.is_connect() && !e.is_timeout(),
+    }
+}
+
+/// The request again as a common download tool ([`FALLBACK_AGENT`]); `None` if refused too.
+async fn with_other_agent(client: &Client, url: &Url, headers: &HeaderMap, ask: Ask) -> Option<(Probe, Option<Response>)> {
+    let agent = HeaderValue::from_static(FALLBACK_AGENT);
+    if headers.get(header::USER_AGENT) == Some(&agent) {
+        return None;
+    }
+    let mut other = headers.clone();
+    other.insert(header::USER_AGENT, agent.clone());
+    let (mut probe, res) = attempt_probe(client, url, &other, ask).await.ok()?;
+    probe.agent = Some(agent);
+    Some((probe, res))
+}
+
+/// One attempt; a refusal comes with the wait the server asked for (`Retry-After`).
+async fn attempt_probe(client: &Client, url: &Url, headers: &HeaderMap, ask: Ask) -> Result<(Probe, Option<Response>), (EngineError, Option<Duration>)> {
+    let range = if ask == Ask::Data { "bytes=0-" } else { "bytes=0-0" };
     let res = client
         .get(url.clone())
         .headers(headers.clone())
-        .header(header::RANGE, "bytes=0-0")
+        .header(header::RANGE, range)
         .send()
-        .await?
-        .error_for_status()?;
+        .await
+        .map_err(|e| (e.into(), None))?;
+    let retry_after = crate::retry_after(res.headers());
+    let res = res.error_for_status().map_err(|e| (e.into(), retry_after))?;
 
     let h = res.headers();
-    let ranges = res.status() == StatusCode::PARTIAL_CONTENT;
-    let size = if ranges {
+    let partial = res.status() == StatusCode::PARTIAL_CONTENT;
+    let size = if partial {
         h.get(header::CONTENT_RANGE)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.rsplit('/').next())
@@ -73,6 +154,10 @@ async fn try_probe(client: &Client, url: &Url, headers: &HeaderMap) -> Result<Pr
     } else {
         res.content_length()
     };
+    // Asked for the whole file, some servers answer with the whole file (200) although they serve
+    // parts: they say so (`Accept-Ranges: bytes`).
+    let announced = h.get(header::ACCEPT_RANGES).and_then(|v| v.to_str().ok()).is_some_and(|v| v.trim().eq_ignore_ascii_case("bytes"));
+    let ranges = partial || (ask == Ask::Data && announced);
     let version = version_of(h);
     let disposition = h.get(header::CONTENT_DISPOSITION).and_then(|v| v.to_str().ok());
     let content_type = h.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
@@ -82,13 +167,21 @@ async fn try_probe(client: &Client, url: &Url, headers: &HeaderMap) -> Result<Pr
         let stem = file_name.rsplit_once('.').map_or(file_name.as_str(), |(s, _)| s);
         file_name = format!("{stem}.ts");
     }
+    let mut probe = Probe { size, ranges: ranges && size.is_some() && !hls, file_name, hls, version, agent: None };
+    if ask == Ask::Data {
+        // The whole file, without a word about parts: asked for a small part, many a server still
+        // serves one (several connections are then possible). Not worth asking for a small file.
+        if !probe.ranges && !hls && size.is_some_and(|s| s >= WORTH_PARTS) {
+            probe.ranges = Box::pin(attempt_probe(client, url, headers, Ask::Facts)).await.is_ok_and(|(facts, _)| facts.ranges && facts.size == size);
+        }
+        return Ok((probe, Some(res)));
+    }
     // Drain the 1-byte body so this warm (TLS-established) connection returns to the pool and
     // the first worker reuses it. Never for a 200: that body would be the whole file.
-    if ranges {
+    if partial {
         let _ = res.bytes().await;
     }
-
-    Ok(Probe { size, ranges: ranges && size.is_some() && !hls, file_name, hls, version })
+    Ok((probe, None))
 }
 
 pub fn suggest_file_name(url: &Url, disposition: Option<&str>) -> String {

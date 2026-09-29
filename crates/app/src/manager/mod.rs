@@ -338,6 +338,10 @@ struct Recording {
     last_data: Instant,
 }
 
+/// Media sources one recording may create (the programme, ads, quality restarts): far more than a
+/// player needs.
+const MAX_RECORDING_SOURCES: usize = 64;
+
 impl Recording {
     fn part(&self, ms: u32, track: Track) -> PathBuf {
         with_suffix(&self.target, &format!(".rec{ms}.{}", track.name()))
@@ -1251,6 +1255,11 @@ impl Manager {
         let (path, id) = {
             let mut recordings = lock(&self.recordings);
             let Some(r) = recordings.get_mut(token) else { return Ok(false) };
+            // A page creating media sources without end (a file each) is not a player: refused.
+            let new_source = !r.parts.keys().any(|(m, _)| *m == ms);
+            if new_source && r.parts.keys().map(|(m, _)| *m).collect::<HashSet<_>>().len() >= MAX_RECORDING_SOURCES {
+                return Ok(false);
+            }
             r.last_data = Instant::now();
             *r.parts.entry((ms, track)).or_default() += data.len() as u64;
             (r.part(ms, track), r.id)
@@ -1839,6 +1848,7 @@ fn describe(err: &engine::EngineError) -> String {
         E::RangeIgnored => tr!("le serveur a renvoyé une plage incohérente", "the server sent an inconsistent range").into(),
         E::Empty => tr!("le serveur n'a renvoyé aucune donnée (lien expiré ou protégé)", "the server sent no data (link expired or protected)").into(),
         E::Truncated => tr!("connexion coupée avant la fin", "connection cut before the end").into(),
+        E::Stalled => tr!("connexion interrompue", "connection interrupted").into(),
         E::LocalNetwork => tr!("bloqué : un contenu Internet visait votre réseau local", "blocked: Internet content pointing into your local network").into(),
         E::Playlist(m) => trf!("flux vidéo : {m}", "video stream: {m}", m = m),
         E::Mux(e) => trf!("fusion audio/vidéo impossible : {e}", "cannot merge audio and video: {e}", e = e),

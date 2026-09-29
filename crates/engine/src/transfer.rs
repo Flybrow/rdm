@@ -1,18 +1,23 @@
 use std::{
     cmp::min,
-    io::SeekFrom,
-    path::{Path, PathBuf},
-    sync::{Arc, atomic::Ordering::*},
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering::*},
+    },
     time::Duration,
 };
 
 use domain::{Segment, plan_segments};
 use futures_util::StreamExt;
-use reqwest::{Client, StatusCode, header::{HeaderMap, RANGE}};
+use reqwest::{
+    Client, Response, StatusCode,
+    header::{HeaderMap, RANGE},
+};
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{self, File, OpenOptions},
-    io::{AsyncSeekExt, AsyncWriteExt},
+    io::AsyncWriteExt,
     task::JoinSet,
     time::{Instant, MissedTickBehavior, interval_at},
 };
@@ -38,8 +43,10 @@ const FLUSH_AFTER: Duration = Duration::from_secs(5);
 
 /// Resume state written this often while downloading (data synced first).
 const CHECKPOINT: Duration = Duration::from_secs(20);
-/// How often the pacer may add connections.
-const RAMP_EVERY: Duration = Duration::from_secs(1);
+/// How often the pacer may add connections (and each connection's speed is measured): during
+/// slow start, connections double at each tick while they pay off — full speed within a second
+/// or two on a fast line.
+const RAMP_EVERY: Duration = Duration::from_millis(500);
 /// Longest wait between two attempts of the last connection (network down, busy server).
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
 /// A server without range support restarts the file from zero after a cut: at most this often.
@@ -49,7 +56,7 @@ struct Ctx {
     client: Client,
     url: Url,
     headers: HeaderMap,
-    path: PathBuf,
+    disk: Arc<Disk>,
     slots: Slots,
     ranges: bool,
     size: Option<u64>,
@@ -58,6 +65,8 @@ struct Ctx {
     limit: Arc<RateLimit>,
     own_limit: Arc<RateLimit>,
     pace: Pace,
+    /// Connections receiving a body right now (what the server accepted, for the pacer).
+    streaming: AtomicUsize,
     /// Write buffer per connection.
     buf: usize,
 }
@@ -68,36 +77,58 @@ pub(crate) async fn run(
     progress: Arc<Progress>,
     cancel: CancellationToken,
 ) -> Result<Outcome, EngineError> {
+    let state = state_path(&job.target);
+    let pace = Pace::new(usize::from(job.connections), host_key(&job.url));
+    // The server asked a recent download to come back later (`Retry-After`): not before.
+    let wait = pace.hold();
+    if !wait.is_zero() && pause(&cancel, wait).await {
+        return Ok(Outcome::Paused);
+    }
+    // Resuming: the facts only (the start of the file may be here already). Otherwise the first
+    // request brings the first bytes of the file too.
+    let resuming = fs::try_exists(&state).await.unwrap_or(false);
     // The first request retries for a while: a pause must not wait for it.
-    let info = tokio::select! {
+    let (info, first) = tokio::select! {
         biased;
         () = cancel.cancelled() => return Ok(Outcome::Paused),
-        info = probe(client, &job.url, &job.headers) => info?,
+        found = async {
+            if resuming { probe(client, &job.url, &job.headers).await.map(|info| (info, None)) } else { probe::open(client, &job.url, &job.headers).await }
+        } => found?,
+    };
+    // The server refused the browser-like identity but took another one: every request uses it.
+    let adjusted;
+    let job = match &info.agent {
+        Some(agent) => {
+            let mut headers = job.headers.clone();
+            headers.insert(reqwest::header::USER_AGENT, agent.clone());
+            adjusted = Job { headers, ..job.clone() };
+            &adjusted
+        }
+        None => job,
     };
     if info.hls {
+        drop(first); // the playlist is read by the HLS engine
         return crate::hls::run(client, job, progress, cancel).await;
     }
-    let state = state_path(&job.target);
-    let pace = Pace::new(usize::from(job.connections));
     pace.cap(speed_cap(Job::effective_limit(&job.limit, &job.own_limit)));
 
     // An empty body is how expired/blocked media links (e.g. YouTube) answer: never report it as done.
     if info.size == Some(0) {
         return Err(EngineError::Empty);
     }
-    let segments = match info.size {
+    let (segments, disk) = match info.size {
         Some(size) if info.ranges => match load_state(&state, &job.target, size, info.version.as_deref()).await {
-            Some(saved) => saved,
+            Some(saved) => (saved, Disk::open(&job.target).await?),
             None => {
-                preallocate(&job.target, size).await?;
+                let disk = Disk::create(&job.target, size).await?;
                 // A few big pieces: connections added later split the largest remaining one.
                 let first = u8::try_from(pace.limit()).unwrap_or(u8::MAX);
-                plan_segments(size, first, MIN_SPLIT)
+                (plan_segments(size, first, MIN_SPLIT), disk)
             }
         },
         size => {
-            preallocate(&job.target, 0).await?;
-            vec![Segment::new(0, size.map_or(u64::MAX - 1, |s| s.saturating_sub(1)))]
+            let disk = Disk::create(&job.target, 0).await?;
+            (vec![Segment::new(0, size.map_or(u64::MAX - 1, |s| s.saturating_sub(1)))], disk)
         }
     };
 
@@ -105,7 +136,7 @@ pub(crate) async fn run(
         client: client.clone(),
         url: job.url.clone(),
         headers: job.headers.clone(),
-        path: job.target.clone(),
+        disk,
         slots: Slots::new(segments),
         ranges: info.ranges,
         size: info.size,
@@ -114,6 +145,7 @@ pub(crate) async fn run(
         limit: job.limit.clone(),
         own_limit: job.own_limit.clone(),
         pace,
+        streaming: AtomicUsize::new(0),
         buf: (BUF_BUDGET / usize::from(job.connections.max(1))).clamp(MIN_BUF, MAX_BUF),
     });
     ctx.progress.total.store(info.size.unwrap_or(0), Relaxed);
@@ -122,9 +154,13 @@ pub(crate) async fn run(
     let mut workers = JoinSet::new();
     // Resumed with more pieces than connections allowed: the rest wait for a free connection.
     let mut pending = ctx.slots.pending().into_iter();
+    // The first request's answer carries the file from its first byte: for the piece starting there.
+    let mut first = first;
     for slot in pending.by_ref().take(ctx.pace.limit()) {
-        spawn(&mut workers, &ctx, slot);
+        let from_start = slot.snapshot().start == 0 && slot.pos.load(Acquire) == 0;
+        spawn(&mut workers, &ctx, slot, if from_start { first.take() } else { None });
     }
+    drop(first);
     for slot in pending {
         ctx.slots.release(slot);
     }
@@ -132,7 +168,7 @@ pub(crate) async fn run(
     let mut checkpoint = interval_at(Instant::now() + CHECKPOINT, CHECKPOINT);
     let mut ramp = interval_at(Instant::now() + RAMP_EVERY, RAMP_EVERY);
     ramp.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let (mut growth, mut counted) = (Growth::default(), ctx.progress.downloaded.load(Relaxed));
+    let (mut growth, mut counted, mut ticked) = (Growth::default(), ctx.progress.downloaded.load(Relaxed), Instant::now());
     loop {
         tokio::select! {
             joined = workers.join_next() => {
@@ -140,21 +176,30 @@ pub(crate) async fn run(
                 if let Err(e) = res.map_err(|e| EngineError::Io(e.into())).and_then(|r| r) {
                     ctx.stop.cancel();
                     failure.get_or_insert(e);
+                } else if ctx.ranges && !ctx.stop.is_cancelled() && ctx.slots.all_done() {
+                    // Every byte is on disk: a connection still open only overshoots a piece
+                    // taken over from it (a straggler) — no reason to wait for it.
+                    ctx.stop.cancel();
                 }
             }
             // A crash, a kill or a session closing mid-download loses at most this much.
             _ = checkpoint.tick(), if info.ranges => {
                 let _ = persist(&job.target, &state, info.version.as_deref(), &ctx.slots.segments()).await;
             }
-            // More connections while they help: waiting pieces first, then halves of the largest.
+            // More connections while they help: waiting pieces first, then parts of the piece
+            // expected to finish last; dead connections replaced.
             _ = ramp.tick(), if info.ranges && failure.is_none() && !ctx.stop.is_cancelled() => {
+                ctx.slots.measure(ticked.elapsed());
+                ticked = Instant::now();
                 let now = ctx.progress.downloaded.load(Relaxed);
-                let grow = growth.more(now.saturating_sub(counted));
+                let grow = growth.more(now.saturating_sub(counted), ctx.pace.slow_start());
                 counted = now;
-                let limit = ctx.pace.ramp(speed_cap(Job::effective_limit(&ctx.limit, &ctx.own_limit)), grow);
-                while ctx.progress.active.load(Acquire) < limit {
-                    let Some(slot) = ctx.slots.steal() else { break };
-                    spawn(&mut workers, &ctx, slot);
+                let cap = speed_cap(Job::effective_limit(&ctx.limit, &ctx.own_limit));
+                let limit = ctx.pace.ramp(cap, grow, ctx.streaming.load(Acquire));
+                // The server said when to come back (`Retry-After`): no new request before.
+                while ctx.pace.hold().is_zero() && ctx.progress.active.load(Acquire) < limit {
+                    let Some(slot) = ctx.slots.steal(ctx.pace.spare_requests(), !ctx.pace.counts_requests()) else { break };
+                    spawn(&mut workers, &ctx, slot, None);
                 }
             }
         }
@@ -178,22 +223,33 @@ pub(crate) async fn run(
     }
 }
 
-/// A new connection on `slot`, counted as active from now on (the pacer reads the count).
-fn spawn(workers: &mut JoinSet<Result<(), EngineError>>, ctx: &Arc<Ctx>, slot: Arc<Slot>) {
-    let active = Active::enter(ctx.clone());
-    workers.spawn(worker(ctx.clone(), slot, active));
+/// `host:port` of `url`: the server whose accepted connection count the pacer remembers.
+fn host_key(url: &Url) -> Option<String> {
+    Some(format!("{}:{}", url.host_str()?.to_ascii_lowercase(), url.port_or_known_default()?))
 }
 
+/// A new connection on `slot`, counted as active from now on (the pacer reads the count);
+/// `first`: the download's first request, already answered (see `probe::open`).
+fn spawn(workers: &mut JoinSet<Result<(), EngineError>>, ctx: &Arc<Ctx>, slot: Arc<Slot>, first: Option<Response>) {
+    let active = Active::enter(ctx.clone());
+    workers.spawn(worker(ctx.clone(), slot, active, first));
+}
+
+/// Syncs the data through a handle of its own (the connections keep writing through theirs),
+/// then records how far each piece went.
 async fn persist(target: &Path, state: &Path, version: Option<&str>, segs: &[Segment]) -> std::io::Result<()> {
     OpenOptions::new().write(true).open(target).await?.sync_data().await?;
     save_state(state, version, segs).await
 }
 
-async fn worker(ctx: Arc<Ctx>, mut slot: Arc<Slot>, mut active: Active) -> Result<(), EngineError> {
+async fn worker(ctx: Arc<Ctx>, mut slot: Arc<Slot>, mut active: Active, mut first: Option<Response>) -> Result<(), EngineError> {
+    // This worker's last request was accepted: its next one follows it (see `Pace::refuse`).
+    let mut followed = false;
     loop {
-        if !fetch_with_retry(&ctx, &slot, &mut active).await? {
+        if !fetch_with_retry(&ctx, &mut slot, &mut active, followed, &mut first).await? {
             return Ok(()); // this connection closed: its piece went back to the others
         }
+        followed = true;
         if ctx.stop.is_cancelled() || !ctx.ranges {
             return Ok(());
         }
@@ -201,7 +257,7 @@ async fn worker(ctx: Arc<Ctx>, mut slot: Arc<Slot>, mut active: Active) -> Resul
         if ctx.progress.active.load(Acquire) > ctx.pace.limit() && active.try_leave() {
             return Ok(());
         }
-        match ctx.slots.steal() {
+        match ctx.slots.steal(ctx.pace.spare_requests(), !ctx.pace.counts_requests()) {
             Some(next) => slot = next,
             None => return Ok(()),
         }
@@ -210,11 +266,24 @@ async fn worker(ctx: Arc<Ctx>, mut slot: Arc<Slot>, mut active: Active) -> Resul
 
 /// `Ok(true)`: the piece is done (or the download stopped). `Ok(false)`: this connection failed
 /// while others keep going; the piece was handed back to them.
-async fn fetch_with_retry(ctx: &Ctx, slot: &Arc<Slot>, active: &mut Active) -> Result<bool, EngineError> {
-    let (mut attempt, mut restarts) = (0u32, 0u32);
+async fn fetch_with_retry(
+    ctx: &Ctx,
+    slot: &mut Arc<Slot>,
+    active: &mut Active,
+    mut followed: bool,
+    first: &mut Option<Response>,
+) -> Result<bool, EngineError> {
+    let (mut attempt, mut restarts, mut replaced) = (0u32, 0u32, false);
     loop {
+        // A server counting requests: none before the time it said (`Retry-After`).
+        let hold = ctx.pace.hold();
+        if ctx.pace.counts_requests() && !hold.is_zero() && pause(&ctx.stop, hold).await {
+            return Ok(true);
+        }
         let before = slot.pos.load(Acquire);
-        let err = match fetch(ctx, slot).await {
+        let result = fetch(ctx, slot, followed, first.take()).await;
+        followed = false;
+        let err = match result {
             Ok(()) => return Ok(true),
             // A pause racing a network error is still a pause, not a failure.
             Err(_) if ctx.stop.is_cancelled() => return Ok(true),
@@ -224,7 +293,19 @@ async fn fetch_with_retry(ctx: &Ctx, slot: &Arc<Slot>, active: &mut Active) -> R
         if slot.pos.load(Acquire) > before {
             attempt = 0;
         }
-        ctx.pace.trouble(ctx.progress.active.load(Acquire), err.is_throttled());
+        // A dead or far too slow connection was closed (see `Slots::measure`): a fresh one takes
+        // over at once — the bad one is never reused. Twice in a row is treated like any failure.
+        if matches!(err, EngineError::Stalled) && !std::mem::replace(&mut replaced, true) {
+            continue;
+        }
+        replaced = false;
+        match &err {
+            // A refusal was counted by `fetch` (with the server's `Retry-After`); a dead connection
+            // is one bad path, not a sign that the network takes fewer connections.
+            e if e.is_throttled() => {}
+            EngineError::Stalled => {}
+            _ => ctx.pace.trouble(ctx.progress.active.load(Acquire)),
+        }
         err.forget_address();
         if ctx.ranges && active.try_leave() {
             ctx.slots.release(slot.clone());
@@ -243,10 +324,18 @@ async fn fetch_with_retry(ctx: &Ctx, slot: &Arc<Slot>, active: &mut Active) -> R
             restart(ctx, slot).await?;
         }
         attempt += 1;
+        // The server said when to come back (`Retry-After`): exactly then. Otherwise longer and
+        // longer waits.
         let base: u64 = if err.is_throttled() { 2000 } else { 500 };
-        let wait = Duration::from_millis(base << attempt.min(6)).min(MAX_BACKOFF);
+        let hold = ctx.pace.hold();
+        let wait = if err.is_throttled() && !hold.is_zero() { hold } else { Duration::from_millis(base << attempt.min(6)).min(MAX_BACKOFF).max(hold) };
         if pause(&ctx.stop, wait).await {
             return Ok(true);
+        }
+        // Refused (or a server counting requests): the next request starts at the first missing
+        // byte and runs on through the free pieces — as few requests as possible.
+        if ctx.ranges && (ctx.pace.counts_requests() || (ctx.pace.spare_requests() && err.is_throttled())) {
+            *slot = ctx.slots.restart_lowest(slot);
         }
     }
 }
@@ -255,7 +344,7 @@ async fn fetch_with_retry(ctx: &Ctx, slot: &Arc<Slot>, active: &mut Active) -> R
 async fn restart(ctx: &Ctx, slot: &Slot) -> std::io::Result<()> {
     slot.pos.store(0, Release);
     ctx.progress.downloaded.store(0, Relaxed);
-    OpenOptions::new().write(true).open(&ctx.path).await?.set_len(0).await
+    ctx.disk.truncate().await
 }
 
 /// Sleeps `d`; `true` if cancelled meanwhile.
@@ -266,26 +355,45 @@ async fn pause(stop: &CancellationToken, d: Duration) -> bool {
     }
 }
 
-async fn fetch(ctx: &Ctx, slot: &Slot) -> Result<(), EngineError> {
+async fn fetch(ctx: &Ctx, slot: &Slot, followed: bool, answered: Option<Response>) -> Result<(), EngineError> {
     let pos = slot.pos.load(Acquire);
     let end = slot.end.load(Acquire);
     if pos > end {
         return Ok(());
     }
+    // Cancelled when this connection stops receiving while the others do (see `Slots::measure`).
+    let kill = slot.attach();
+    let asked_at = Instant::now();
 
-    let mut req = ctx.client.get(ctx.url.clone()).headers(ctx.headers.clone());
-    if ctx.ranges {
-        req = req.header(RANGE, format!("bytes={pos}-{end}"));
-    }
-    // Connecting can take seconds: a pause must not wait for it.
-    let res = tokio::select! {
-        biased;
-        () = ctx.stop.cancelled() => return Ok(()),
-        res = req.send() => res?.error_for_status()?,
+    // A request that may run on into the next free piece, without asking again: whenever the
+    // server counts requests, and for the first piece — should the server refuse the other
+    // connections, this one carries on alone.
+    let open = ctx.ranges && ctx.size.is_some() && (ctx.pace.spare_requests() || pos == 0);
+    let asked = if open { ctx.size.map_or(end, |size| size - 1) } else { end };
+    let res = match answered {
+        // The download's first request (`bytes=0-`), answered already.
+        Some(res) => res,
+        None => {
+            let mut req = ctx.client.get(ctx.url.clone()).headers(ctx.headers.clone());
+            if ctx.ranges {
+                req = req.header(RANGE, format!("bytes={pos}-{asked}"));
+            }
+            // Connecting can take seconds: a pause must not wait for it.
+            let res = tokio::select! {
+                biased;
+                () = ctx.stop.cancelled() => return Ok(()),
+                () = kill.cancelled() => return Err(EngineError::Stalled),
+                res = req.send() => res?,
+            };
+            if matches!(res.status().as_u16(), 429 | 503) {
+                ctx.pace.refuse(ctx.progress.active.load(Acquire), crate::retry_after(res.headers()), followed);
+            }
+            res.error_for_status()?
+        }
     };
     // A 206 for another range (broken proxy/CDN) would silently corrupt the file. A 200 is the whole
     // file: right only when the whole file was asked for (RFC 9110 lets a server answer that way).
-    let whole_file = pos == 0 && ctx.size.is_some_and(|size| end.checked_add(1) == Some(size));
+    let whole_file = pos == 0 && ctx.size.is_some_and(|size| asked.checked_add(1) == Some(size));
     let fits = match res.status() {
         StatusCode::PARTIAL_CONTENT => range_start(res.headers()) == Some(pos),
         // Its length too: a server answering with another version of the file (another size) would
@@ -296,9 +404,8 @@ async fn fetch(ctx: &Ctx, slot: &Slot) -> Result<(), EngineError> {
     if ctx.ranges && !fits {
         return Err(EngineError::RangeIgnored);
     }
+    let _receiving = Counted::enter(&ctx.streaming);
 
-    let mut file = OpenOptions::new().write(true).open(&ctx.path).await?;
-    file.seek(SeekFrom::Start(pos)).await?;
     let mut stream = res.bytes_stream();
     // Grows with the connection's speed up to its share: slow connections (flushed every few
     // seconds) never hold the full size.
@@ -307,12 +414,14 @@ async fn fetch(ctx: &Ctx, slot: &Slot) -> Result<(), EngineError> {
     // Hot loop (thousands of chunks per second per connection): the stop token — shared by every
     // connection of the job — is subscribed to once, not re-registered under its lock per chunk.
     let stopped = ctx.stop.cancelled();
-    tokio::pin!(stopped);
+    let killed = kill.cancelled();
+    tokio::pin!(stopped, killed);
 
     let result = loop {
         let chunk = tokio::select! {
             biased;
             () = &mut stopped => break Ok(false),
+            () = &mut killed => break Err(EngineError::Stalled),
             chunk = stream.next() => chunk,
         };
         let chunk = match chunk {
@@ -320,15 +429,36 @@ async fn fetch(ctx: &Ctx, slot: &Slot) -> Result<(), EngineError> {
             Some(Err(e)) => break Err(EngineError::from(e)),
             None => break Ok(true),
         };
-        let written = slot.pos.load(Acquire) + buf.len() as u64;
-        let room = slot.end.load(Acquire).saturating_add(1).saturating_sub(written);
-        let n = min(chunk.len() as u64, room) as usize;
-        if buf.len() + n > buf.capacity() {
-            // Doubles towards this connection's share, never beyond it (plus this chunk).
-            let target = (buf.capacity() * 2).clamp(MIN_BUF, ctx.buf).max(buf.len() + n);
-            buf.reserve_exact(target - buf.len());
+        // What fits in this piece — for an open request, running on into the next free pieces.
+        let (mut rest, mut taken, mut over) = (&chunk[..], 0, false);
+        while !rest.is_empty() {
+            let written = slot.pos.load(Acquire) + buf.len() as u64;
+            let room = slot.end.load(Acquire).saturating_add(1).saturating_sub(written);
+            if room == 0 {
+                // A server counting requests: rather read again a piece already here than ask anew.
+                match ctx.slots.run_on(slot, open, ctx.pace.counts_requests()) {
+                    Some(again) => {
+                        ctx.progress.downloaded.fetch_sub(again, Relaxed);
+                        continue;
+                    }
+                    None => {
+                        over = true;
+                        break;
+                    }
+                }
+            }
+            let n = min(rest.len() as u64, room) as usize;
+            if buf.len() + n > buf.capacity() {
+                // Doubles towards this connection's share, never beyond it (plus this chunk).
+                let target = (buf.capacity() * 2).clamp(MIN_BUF, ctx.buf).max(buf.len() + n);
+                buf.reserve_exact(target - buf.len());
+            }
+            buf.extend_from_slice(&rest[..n]);
+            slot.head.store(written + n as u64, Release);
+            rest = &rest[n..];
+            taken += n;
         }
-        buf.extend_from_slice(&chunk[..n]);
+        let n = taken;
         ctx.progress.downloaded.fetch_add(n as u64, Relaxed);
         ctx.pace.progressed(); // something arrived: the connection is alive, however slow
         // Throttling sleeps can be long: they must not delay a pause/shutdown. The global limit, then
@@ -342,22 +472,25 @@ async fn fetch(ctx: &Ctx, slot: &Slot) -> Result<(), EngineError> {
                 }
             }
         }
-        if n < chunk.len() {
+        if over {
             break Ok(false);
         }
         // Full, or held for a while (a slow connection): to disk, where a checkpoint can count it.
         if buf.len() >= ctx.buf || flushed.elapsed() >= FLUSH_AFTER {
-            flush(&mut file, &mut buf, slot).await?;
+            buf = flush(&ctx.disk, buf, slot).await?;
             flushed = Instant::now();
         }
     };
     if !buf.is_empty() {
-        flush(&mut file, &mut buf, slot).await?;
+        flush(&ctx.disk, buf, slot).await?;
     }
-    file.flush().await?;
 
     let eof = result?;
     let written = slot.pos.load(Acquire);
+    // The piece is done: how fast this connection went (for telling stragglers apart).
+    if slot.snapshot().is_done() {
+        ctx.slots.finished(written.saturating_sub(pos), asked_at.elapsed());
+    }
     match (eof, ctx.ranges, ctx.size) {
         (false, ..) => Ok(()),
         (true, false, _) if written == 0 => Err(EngineError::Empty),
@@ -372,32 +505,83 @@ async fn fetch(ctx: &Ctx, slot: &Slot) -> Result<(), EngineError> {
     }
 }
 
-/// Writes the buffer, then advances the segment: `pos` only ever covers bytes the OS has, so a
-/// checkpoint (sync + state) never claims data still in flight.
-async fn flush(file: &mut File, buf: &mut Vec<u8>, slot: &Slot) -> std::io::Result<()> {
-    if !buf.is_empty() {
-        file.write_all(buf).await?;
-        file.flush().await?; // tokio completes the write in the background otherwise
-        slot.pos.fetch_add(buf.len() as u64, Release);
-        buf.clear();
-    }
-    Ok(())
+/// Writes the buffer where it belongs, then advances the segment: `pos` only ever covers bytes the
+/// OS has, so a checkpoint (sync + state) never claims data still in flight. The buffer comes back
+/// empty, for reuse.
+async fn flush(disk: &Arc<Disk>, buf: Vec<u8>, slot: &Slot) -> std::io::Result<Vec<u8>> {
+    let len = buf.len() as u64;
+    let mut buf = disk.write_at(buf, slot.pos.load(Acquire)).await?;
+    slot.pos.fetch_add(len, Release);
+    buf.clear();
+    Ok(buf)
 }
 
-async fn preallocate(path: &Path, size: u64) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).await?;
+/// The file being downloaded, opened once for every connection: each writes at its own offset
+/// (no seek, no reopening). Opening and closing a file for each piece costs system calls — and on
+/// Windows an antivirus scan of the whole file at each close after writing.
+struct Disk(std::fs::File);
+
+impl Disk {
+    /// A new file of `size` bytes (sparse where the system allows it).
+    async fn create(path: &Path, size: u64) -> std::io::Result<Arc<Self>> {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).await?;
+        }
+        let file = File::create(path).await?.into_std().await;
+        sparse(&file);
+        let disk = Arc::new(Self(file));
+        let d = disk.clone();
+        tokio::task::spawn_blocking(move || d.0.set_len(size)).await.map_err(std::io::Error::other)??;
+        Ok(disk)
     }
-    let file = File::create(path).await?;
-    sparse(&file);
-    file.set_len(size).await
+
+    /// The file of a download being resumed.
+    async fn open(path: &Path) -> std::io::Result<Arc<Self>> {
+        let file = OpenOptions::new().write(true).open(path).await?.into_std().await;
+        Ok(Arc::new(Self(file)))
+    }
+
+    async fn write_at(self: &Arc<Self>, buf: Vec<u8>, offset: u64) -> std::io::Result<Vec<u8>> {
+        let disk = self.clone();
+        tokio::task::spawn_blocking(move || disk.write_all_at(&buf, offset).map(|()| buf)).await.map_err(std::io::Error::other)?
+    }
+
+    async fn truncate(self: &Arc<Self>) -> std::io::Result<()> {
+        let disk = self.clone();
+        tokio::task::spawn_blocking(move || disk.0.set_len(0)).await.map_err(std::io::Error::other)?
+    }
+
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            self.0.write_all_at(buf, offset)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileExt;
+            let (mut buf, mut offset) = (buf, offset);
+            while !buf.is_empty() {
+                match self.0.seek_write(buf, offset) {
+                    Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                    Ok(n) => {
+                        buf = &buf[n..];
+                        offset += n as u64;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Windows: a sparse file. On a plain NTFS file, writing far past the data written so far first
 /// makes the file system fill the gap with zeros — every segment but the first would wait for
 /// gigabytes of zeros before its first byte lands, and the disk would write the file twice.
 /// (Linux file systems create sparse files by themselves.) Best effort: FAT/exFAT refuse it.
-fn sparse(file: &File) {
+fn sparse(file: &std::fs::File) {
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
@@ -479,6 +663,22 @@ async fn save_state(state: &Path, version: Option<&str>, segs: &[Segment]) -> st
     fs::rename(tmp, state).await
 }
 
+/// Counts itself in an `AtomicUsize` while alive.
+struct Counted<'a>(&'a AtomicUsize);
+
+impl<'a> Counted<'a> {
+    fn enter(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, AcqRel);
+        Self(count)
+    }
+}
+
+impl Drop for Counted<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, AcqRel);
+    }
+}
+
 /// One live connection of a download, counted in `Progress::active` (shown, and read by the pacer).
 struct Active {
     ctx: Arc<Ctx>,
@@ -539,10 +739,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn every_connection_writes_at_its_own_offset() {
+        let dir = std::env::temp_dir().join(format!("rdm-disk-{}", std::process::id()));
+        let path = dir.join("f.bin");
+        let disk = Disk::create(&path, 8).await.unwrap();
+        let (a, b) = tokio::join!(disk.write_at(b"5678".to_vec(), 4), disk.write_at(b"1234".to_vec(), 0));
+        assert!(a.unwrap().capacity() >= 4 && b.is_ok(), "the buffers come back for reuse");
+        drop(disk);
+        assert_eq!(std::fs::read(&path).unwrap(), b"12345678");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn parses_content_range() {
         let mut h = HeaderMap::new();
         h.insert(reqwest::header::CONTENT_RANGE, "bytes 1024-2047/4096".parse().unwrap());
         assert_eq!(range_start(&h), Some(1024));
+    }
+
+    #[test]
+    fn servers_are_told_apart_by_host_and_port() {
+        let key = |u: &str| host_key(&u.parse().unwrap());
+        assert_eq!(key("https://CDN.example/a"), Some("cdn.example:443".into()));
+        assert_eq!(key("http://cdn.example:8080/a"), Some("cdn.example:8080".into()));
     }
 }

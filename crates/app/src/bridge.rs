@@ -200,10 +200,14 @@ async fn check(
     if !web(&req.url) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let request_headers = manager::header_map(&req);
+    let mut request_headers = manager::header_map(&req);
     let client = manager.client(&req.url).await;
     let verdict = async {
         let p = engine::probe(&client, &req.url, &request_headers).await?;
+        // The server took another identity than the one asked for: so does the last-byte check.
+        if let Some(agent) = &p.agent {
+            request_headers.insert(engine::header::USER_AGENT, agent.clone());
+        }
         // Some servers (YouTube without its anti-bot token) serve the beginning and refuse the rest:
         // the last byte must be reachable too.
         if let Some(size) = p.size.filter(|&s| s > 1 && p.ranges) {
