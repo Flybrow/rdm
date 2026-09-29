@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { isCapturable, isHls, isMediaType, isMediaUrl, siteOf } from "../shared.js";
+import { dispositionName, downloadName, isCapturable, isHls, isMediaType, isMediaUrl, siteOf } from "../shared.js";
 
 const LIST = "zip mp4 webm iso 7z";
 
@@ -46,4 +46,22 @@ test("site comparison for SameSite cookies", () => {
   assert.equal(siteOf("https://www.youtube.com/watch"), "youtube.com");
   assert.equal(siteOf("https://rr3---sn.googlevideo.com/x"), "googlevideo.com");
   assert.equal(siteOf("garbage"), "");
+});
+
+test("file name of a Content-Disposition header", () => {
+  assert.equal(dispositionName('attachment; filename="a b.zip"'), "a b.zip");
+  assert.equal(dispositionName("attachment; filename=setup.exe"), "setup.exe");
+  assert.equal(dispositionName("attachment; filename=\"x.zip\"; filename*=UTF-8''%C3%A9t%C3%A9.zip"), "été.zip");
+  assert.equal(dispositionName("attachment"), "");
+});
+
+test("a top-level response is a download when attached or not showable", () => {
+  const url = "https://x.io/files/7z2409-x64.exe?sig=1";
+  assert.equal(downloadName(url, "", "application/octet-stream"), "7z2409-x64.exe");
+  assert.equal(downloadName(url, 'attachment; filename="other.exe"', "application/octet-stream"), "other.exe");
+  assert.equal(downloadName("https://x.io/doc.pdf", "", "application/pdf"), "", "shown by the PDF viewer");
+  assert.equal(downloadName("https://x.io/doc.pdf", "attachment", "application/pdf"), "doc.pdf");
+  assert.equal(downloadName("https://x.io/film.mp4", "", "video/mp4"), "", "played in the tab");
+  assert.equal(downloadName("https://x.io/", "", "text/html; charset=utf-8"), "");
+  assert.equal(downloadName("https://x.io/a%20b.zip", "", "application/zip"), "a b.zip");
 });

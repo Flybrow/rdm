@@ -23,9 +23,14 @@ const fail = (m) => { throw new Error(m); };
 if (!chrome.background.service_worker || chrome.background.scripts) fail("Chrome manifest: service_worker only");
 if (!firefox.background.scripts?.includes("background.js") || firefox.background.service_worker) fail("Firefox manifest: scripts only");
 if (!firefox.browser_specific_settings?.gecko?.id) fail("Firefox manifest: gecko id missing");
+// Firefox and its derivatives update the installed package from the latest release: updates.json.
+if (!/^https:\/\/.+\/updates\.json$/.test(firefox.browser_specific_settings.gecko.update_url ?? "")) fail("Firefox manifest: https update_url missing");
 if ("key" in firefox || "minimum_chrome_version" in firefox) fail("Firefox manifest: Chrome-only keys left");
-// Apart from the background entry and the Chrome-only keys, both builds are identical.
-const strip = ({ background, key, minimum_chrome_version, ...rest }) => JSON.stringify(rest);
+// Chrome MV3 refuses `webRequestBlocking`; Firefox needs it to take downloads over before they start.
+if (!firefox.permissions.includes("webRequestBlocking") || chrome.permissions.includes("webRequestBlocking")) fail("webRequestBlocking: Firefox only");
+// Apart from the background entry, the Chrome-only keys and that permission, both builds are identical.
+const strip = ({ background, key, minimum_chrome_version, permissions, ...rest }) =>
+  JSON.stringify({ ...rest, permissions: permissions.filter((p) => p !== "webRequestBlocking") });
 if (strip(chrome) !== strip(firefox)) fail("Chrome and Firefox manifests diverge");
 for (const f of fs.readdirSync(".").filter((f) => f !== "test")) {
   if (f !== "manifest.json" && !fs.existsSync(process.env.FIREFOX + "/" + f)) fail("Firefox build lacks " + f);

@@ -141,6 +141,17 @@ jobs:
           RDM_SIGNING_KEY: ${{ secrets.RDM_SIGNING_KEY }}
         run: sh .github/sign-packages.sh "${GITHUB_REF#refs/tags/v}" dist
 
+      # Firefox and its derivatives (Waterfox, LibreWolf…) keep their own copy of the extension:
+      # they update it from this file (the manifest's `update_url`, the latest release's asset).
+      - name: Firefox update manifest
+        run: |
+          version=$(jq -r .version extension/manifest.json)
+          id=$(jq -r .browser_specific_settings.gecko.id extension/manifest.json)
+          hash=$(sha256sum dist/rdm-firefox.xpi | cut -d' ' -f1)
+          link="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/rdm-firefox.xpi"
+          jq -n --arg id "$id" --arg v "$version" --arg link "$link" --arg hash "sha256:$hash"             '{addons: {($id): {updates: [{version: $v, update_link: $link, update_hash: $hash}]}}}' >dist/updates.json
+          cat dist/updates.json
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -155,4 +166,4 @@ jobs:
               gh release create "$tag" --verify-tag --title "RDM ${tag#v}" --generate-notes
             fi
           fi
-          gh release upload "$tag" --clobber dist/*.msi dist/*.deb dist/*.rpm dist/*.tar.gz dist/*.xpi dist/*.zip dist/*.sig
+          gh release upload "$tag" --clobber dist/*.msi dist/*.deb dist/*.rpm dist/*.tar.gz dist/*.xpi dist/*.zip dist/*.sig dist/updates.json

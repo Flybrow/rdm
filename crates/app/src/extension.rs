@@ -128,7 +128,8 @@ pub fn files(flavour: Flavour) -> Vec<(&'static str, Cow<'static, [u8]>)> {
 }
 
 /// Same derivation as `packaging/firefox/build.sh`: Chrome wants an MV3 background service worker
-/// (and flags `background.scripts`), Firefox only knows `background.scripts`; Chrome-only keys go.
+/// (and flags `background.scripts`), Firefox only knows `background.scripts`; Chrome-only keys go;
+/// `webRequestBlocking` (refused by Chrome MV3) lets Firefox take a download over before it starts.
 fn firefox_manifest(chrome: &[u8]) -> Vec<u8> {
     let mut manifest: serde_json::Value = serde_json::from_slice(chrome).expect("extension/manifest.json is valid JSON");
     if let Some(m) = manifest.as_object_mut() {
@@ -138,6 +139,9 @@ fn firefox_manifest(chrome: &[u8]) -> Vec<u8> {
             && let Some(worker) = bg.remove("service_worker")
         {
             bg.insert("scripts".into(), serde_json::Value::Array(vec![worker]));
+        }
+        if let Some(permissions) = m.get_mut("permissions").and_then(serde_json::Value::as_array_mut) {
+            permissions.push("webRequestBlocking".into());
         }
     }
     serde_json::to_vec_pretty(&manifest).expect("serializable")
@@ -358,6 +362,7 @@ mod tests {
         assert!(m["background"].get("service_worker").is_none());
         assert!(m.get("key").is_none() && m.get("minimum_chrome_version").is_none());
         assert!(m["browser_specific_settings"]["gecko"]["id"].is_string());
+        assert!(m["permissions"].as_array().unwrap().iter().any(|p| p == "webRequestBlocking"));
         let chrome: serde_json::Value =
             serde_json::from_slice(&files(Flavour::Chromium).iter().find(|(n, _)| *n == "manifest.json").unwrap().1).unwrap();
         assert!(chrome["background"]["service_worker"].is_string() && chrome.get("key").is_some());

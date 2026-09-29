@@ -1,4 +1,4 @@
-import { isCapturable, isHls, isMediaType, isMediaUrl, siteOf } from "./shared.js";
+import { downloadName, isCapturable, isHls, isMediaType, isMediaUrl, siteOf } from "./shared.js";
 
 // Chrome, Brave, Opera, Edge (`chrome`) and Firefox (`browser`): same promise-based API.
 const ext = globalThis.browser ?? globalThis.chrome;
@@ -354,6 +354,35 @@ async function intercept(item) {
     await forgetConfig();
     toast(t("noAnswer"));
   }
+}
+
+/**
+ * Firefox and its derivatives: a download only shows up in `downloads.onCreated` once the browser
+ * has fetched it (while its "open or save" dialog waits, for instance): too late to pause, and a
+ * small file is already complete. So the response is caught before it becomes a download, as its
+ * headers arrive: RDM takes it over and the browser never fetches it. `onCreated` stays as the
+ * fallback (downloads started otherwise, RDM refusing).
+ */
+async function interceptResponse({ url, method, statusCode, responseHeaders, incognito, cookieStoreId, originUrl, documentUrl }) {
+  // Only what RDM can fetch again on its own: a plain GET, outside private windows.
+  if (method !== "GET" || statusCode < 200 || statusCode >= 300 || incognito || !isWeb(url)) return {};
+  const filename = downloadName(url, header(responseHeaders, "content-disposition"), header(responseHeaders, "content-type"));
+  if (!filename) return {};
+  const captured = await captureList();
+  if (captured == null || !(isCapturable(captured, filename) || isCapturable(captured, url))) return {};
+  const sent = await sendToApp({ url, filename, referrer: originUrl ?? documentUrl, storeId: cookieStoreId });
+  if (sent !== true) return {}; // the browser downloads it (and says why, below)
+  toast(t("sentName", filename));
+  return { cancel: true };
+}
+
+// `blocking` exists in Firefox only (Chrome MV3 refuses it): elsewhere, onDeterminingFilename below.
+if (!ext.downloads.onDeterminingFilename && ext.webRequest.OnHeadersReceivedOptions?.BLOCKING) {
+  ext.webRequest.onHeadersReceived.addListener(
+    interceptResponse,
+    { urls: ["http://*/*", "https://*/*"], types: ["main_frame", "sub_frame"] },
+    ["blocking", "responseHeaders"],
+  );
 }
 
 if (ext.downloads.onDeterminingFilename) {
