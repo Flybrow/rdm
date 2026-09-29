@@ -208,7 +208,7 @@ The script installs the build tools and, if needed, Rust (rustup), builds RDM, i
 | Debian/Ubuntu | `cargo install cargo-deb && cargo deb -p rdm` → `sudo apt install ./target/debian/rdm_*.deb` | `sudo apt remove rdm` |
 | Fedora | `cargo install cargo-generate-rpm && cargo build --release && cargo generate-rpm -p crates/app` → `sudo dnf install ./target/generate-rpm/rdm-*.rpm` | `sudo dnf remove rdm` |
 
-`install.sh` installs RDM in `~/.local` (no administrator rights). With `sudo` it also installs the **missing** system libraries: Wayland/X11, EGL, xkbcommon, the desktop portal (file dialogs) and, on GNOME, the notification-area extension. It supports apt, dnf, zypper and pacman. If the binary is missing and Rust is installed, it builds RDM. `--no-deps` installs nothing system-wide. Checked on Ubuntu 26.04 (GNOME) and Fedora 44 (KDE Plasma).
+`install.sh` installs RDM in `~/.local` (no administrator rights). With `sudo` it also installs the **missing** system libraries: Wayland/X11, EGL, xkbcommon, the desktop portal (file dialogs) and, on GNOME, the notification-area extension. It supports apt, dnf, zypper and pacman. If the binary is missing and Rust is installed, it builds RDM. `--no-deps` installs nothing system-wide. Checked on Ubuntu 26.04 (GNOME) and Fedora 44 (KDE Plasma); `install-ubuntu.sh` and its `--uninstall` also on Ubuntu 26.04 under Windows (WSL).
 
 Icons: the two vector sources are in `crates/app/assets/icon/` (`rdm-small.svg`, bolder, is used up to 32 px). `python3 packaging/icons/render.py` regenerates every size: Windows `.ico`, Linux icons (16 to 512 px + SVG), the extension's icons, the window and notification-area images.
 
