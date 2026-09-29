@@ -125,6 +125,37 @@ pub fn progress(ui: &Ui, rect: Rect, fraction: Option<f32>, (from, to): (Color32
     }
 }
 
+/// The bar of a download split across connections: each piece at its place in the file, filled
+/// as far as its connection got, with a thin gap between pieces and a glow at the head of each
+/// piece still downloading.
+pub fn pieces_progress(ui: &Ui, rect: Rect, pieces: &[domain::Segment], total: u64, (from, to): (Color32, Color32)) {
+    let p = Palette::of(ui);
+    let painter = ui.painter();
+    let radius = CornerRadius::same((rect.height() / 2.0) as u8);
+    painter.rect_filled(rect, radius, p.border);
+    let x_of = |byte: u64| rect.left() + rect.width() * (byte.min(total) as f64 / total as f64) as f32;
+    let time = ui.input(|i| i.time) as f32;
+    let clip = painter.with_clip_rect(rect);
+    for piece in pieces {
+        let (left, right) = (x_of(piece.start), x_of(piece.end.saturating_add(1)));
+        // A 1.5 px gap on the right: the pieces read as separate connections.
+        let right = if right - left > 4.0 { right - 1.5 } else { right };
+        let head = x_of(piece.pos).clamp(left, right);
+        if head > left {
+            // The colour of the whole bar at this place: the pieces together show one gradient.
+            let t = |x: f32| ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            let fill = Rect::from_min_max(pos2(left, rect.top()), pos2(head, rect.bottom()));
+            clip.add(gradient(ui, fill, 1, from.lerp_to_gamma(to, t(left)), from.lerp_to_gamma(to, t(head)), Vec2::X));
+        }
+        if piece.pos <= piece.end && head < right {
+            // Still downloading: a soft pulse at the head of the piece.
+            let alpha = 110.0 + 90.0 * (time * 3.0 + left * 0.05).sin();
+            let glow = Rect::from_min_max(pos2((head - 3.0).max(left), rect.top()), pos2(head + 1.0, rect.bottom()));
+            clip.rect_filled(glow, 1, Color32::from_white_alpha(alpha as u8));
+        }
+    }
+}
+
 // ── Buttons ──────────────────────────────────────────────────────────────
 fn hover_anim(ui: &Ui, response: &Response) -> f32 {
     ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered() || response.has_focus(), 0.12)

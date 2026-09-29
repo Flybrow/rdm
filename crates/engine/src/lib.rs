@@ -13,7 +13,7 @@ mod transfer;
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -171,9 +171,22 @@ pub struct Progress {
     pub downloaded: AtomicU64,
     pub total: AtomicU64,
     pub active: AtomicUsize,
+    /// The file's pieces (one per connection, at most) while a segmented transfer runs, a few
+    /// times a second; empty otherwise. For the progress bar.
+    pieces: Mutex<Vec<domain::Segment>>,
 }
 
 impl Progress {
+    pub fn pieces(&self) -> Vec<domain::Segment> {
+        self.pieces.lock().map(|p| p.clone()).unwrap_or_default()
+    }
+
+    fn set_pieces(&self, pieces: Vec<domain::Segment>) {
+        if let Ok(mut p) = self.pieces.lock() {
+            *p = pieces;
+        }
+    }
+
     pub fn snapshot(&self) -> (u64, u64, usize) {
         (
             self.downloaded.load(Ordering::Relaxed),
