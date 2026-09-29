@@ -104,6 +104,19 @@ Running downloads are paused cleanly and resume afterwards. If the download of t
 | `crates/app`     | Application + UI | Queues, settings, local bridge `127.0.0.1:9614`, native messaging connector, egui interface, notification area, updates |
 | `extension/`     | Browser          | Chrome/Brave/Opera/Edge/Firefox MV3: interception, video detection, YouTube extractor (bundled in RDM, which installs it) |
 
+Where to look, one concern per file:
+
+| Where | What |
+|---|---|
+| `engine/src/transfer.rs` · `slots.rs` · `pace.rs` | One download: its connections, the pieces they share (dynamic segmentation, stragglers), how many connections the server and the network take |
+| `engine/src/probe.rs` · `net.rs` · `rate.rs` | First request (size, name, range support), anti-SSRF and DNS cache, speed limits |
+| `engine/src/hls.rs` · `merged.rs` · `mux.rs` | HLS playlists, separate video and audio tracks, their MP4 merge |
+| `app/src/manager/` | The application service: `mod.rs` (queues, scheduling, ticker), `add.rs` (new downloads), `entry.rs` (a download of the list), `files.rs` (names on disk), `routes.rs` (proxy, clients, logins), `online.rs` (updates, VirusTotal), `browsers.rs`, `recording.rs`, `checksum.rs`, `clipboard.rs` |
+| `app/src/bridge.rs` · `local.rs` · `native.rs` | The local bridge and who may use it, the browsers' native connector |
+| `app/src/settings.rs` · `secrets.rs` · `i18n.rs` | Settings files, encrypted passwords, the 16 languages |
+| `app/src/update.rs` · `virustotal.rs` · `ytdlp.rs` · `extension.rs` | Signed updates, VirusTotal, the YouTube module, the bundled extension |
+| `app/src/ui/` | The egui interface: `theme` → `widgets` → `chrome` (sidebar, header, dashboard), `card` (the list), `dialogs/`, `toast` |
+
 ## VirusTotal
 
 The shield of a completed file (or its right-click menu) starts the analysis, entirely inside RDM: the website is never opened.
@@ -112,7 +125,7 @@ The shield of a completed file (or its right-click menu) starts the analysis, en
 2. Otherwise the file is uploaded (up to 650 MB; above 32 MB through the dedicated upload address), with the progress in the card, then RDM waits for the verdict (a few minutes usually).
 3. The result shows on the card ("0/72" in green, or the number of engines flagging the file, in red); a click opens the report: verdict breakdown, engines that detect something, fingerprint. A desktop notification also announces the verdict, which is kept from one session to the next.
 
-You need **a free API key** (once): create an account on virustotal.com, copy the key from its "API key" page, paste it in **Settings → VirusTotal**. The first click on a shield without a key opens that setting directly. The free API allows 4 requests per minute: RDM runs analyses one at a time and waits if the quota is reached.
+You need **a free API key** (once): create an account on virustotal.com, copy the key from its "API key" page, paste it in **Settings → Security → VirusTotal** (it is kept encrypted with your passwords). The first click on a shield without a key opens that setting directly. The free API allows 4 requests per minute: RDM runs analyses one at a time and waits if the quota is reached.
 
 Privacy: an uploaded file is shared with antivirus vendors. Do not analyse your personal documents. The file's name is not sent (only its extension).
 
@@ -155,14 +168,14 @@ Not supported: DRM content (Netflix, Widevine, FairPlay) and merging WebM stream
 - **No telemetry**. The only connection you did not ask for: the update check (one request to GitHub's API a day, can be turned off).
 - **Signed updates**: every package is verified (Ed25519 signature, SHA-256, format) before it is installed.
 - **Cookies never written to disk** (memory only). `SameSite=Strict` cookies are only sent for a link of the same site as the page, as a browser does. Cookies and site logins stay on their site: a playlist (HLS) or a separate audio track pointing to another site's servers never receives them.
-- **Passwords** (proxy, site logins) are kept apart from the settings, encrypted with DPAPI on Windows (0600 file on Linux), and sent only to their site, over HTTPS (plain HTTP only for a site you saved as `http://…`).
-- **Local bridge** `127.0.0.1`: only **our** extension is accepted (ID pinned on Chrome, paired by the connector or approved in RDM on Firefox); a local program (the native connector, `rdm --quit`) must present a secret token RDM renews at each start in your private settings folder — another account of the computer, or a program that cannot read your files, is refused; before sending anything the connector checks that the program on the port runs under your account (another account cannot pose as RDM to collect cookies); `Host` check (anti DNS rebinding); request bodies capped at 64 KB; http(s) URLs only. The native connector only relays a fixed list of requests (it cannot close RDM).
-- **Anti-SSRF**: a redirect or a playlist coming from the Internet cannot target your local network (router, NAS, printer…) — neither by address nor by a name resolving there (DNS rebinding included). Downloads from your local network keep working.
+- **Passwords** (proxy, site logins) and the **VirusTotal API key** are kept apart from the settings, encrypted with DPAPI on Windows (0600 file on Linux), and sent only to their site, over HTTPS (plain HTTP only for a site you saved as `http://…`).
+- **Local bridge** `127.0.0.1`: a connection from a program of **another account** of the computer is closed before it is read (RDM checks which account runs the program at the other end: a program, unlike a browser, could forge the extension's identity); only **our** extension is accepted (ID pinned on Chrome, paired by the connector or approved in RDM on Firefox); a local program (the native connector, `rdm --quit`) must present a secret token RDM renews at each start in your private settings folder — another account of the computer, or a program that cannot read your files, is refused; before sending anything the connector checks that the program on the port runs under your account (another account cannot pose as RDM to collect cookies); `Host` check (anti DNS rebinding); request bodies capped at 64 KB; http(s) URLs only. The native connector only relays a fixed list of requests (it cannot close RDM).
+- **Anti-SSRF**: a redirect or a playlist coming from the Internet cannot target your local network (router, NAS, printer…) — neither by address (IPv6 forms that carry a local IPv4 address included: NAT64, 6to4) nor by a name resolving there (DNS rebinding included). Downloads from your local network keep working.
 - **Sanitized file names**: no `../`, no reserved Windows names, no text-direction characters (a name cannot pass `.exe` off as `.pdf`), bounded length.
 - **Private settings folder** on Linux (0700): the download list keeps links with their access tokens.
 - **Mark-of-the-Web** (Windows): SmartScreen warns before running a downloaded file, without recording the source URL.
-- **Integrity**: every partial response is checked (`Content-Range`); resume states are validated (contiguous segments, no gap) and written atomically; empty or truncated responses are never reported "complete".
-- **Robustness**: playlist and segment sizes bounded; MP4 parser tested against truncated or corrupted input.
+- **Integrity**: every partial response is checked (`Content-Range`); resume states are validated (contiguous segments, no gap) and written atomically; a merged video is on disk before it takes its name; empty or truncated responses are never reported "complete".
+- **Robustness**: playlist and segment sizes bounded; MP4 parser tested against truncated or corrupted input; a damaged settings file is kept aside (`<name>.bad`) instead of being overwritten.
 - TLS through rustls (no OpenSSL); dependencies audited with `cargo audit`.
 
 ## Build and tests
