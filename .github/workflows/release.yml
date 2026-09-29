@@ -134,7 +134,7 @@ jobs:
 
       # RDM installs an update only if its package carries a valid Ed25519 signature made with this
       # key (repository secret RDM_SIGNING_KEY, a PEM private key; its public half is compiled into
-      # RDM, see crates/app/src/update.rs). What is signed binds the package to its version, so an
+      # RDM, see crates/app/src/update/package.rs). What is signed binds the package to its version, so an
       # old package cannot be replayed as a new one. Tagged builds refuse to ship without it.
       - name: Sign the update packages
         env:

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Signs the update packages of a release: sh .github/sign-packages.sh <version> <folder>
 # The key is the PEM private key in $RDM_SIGNING_KEY (the repository secret). Each package gets
-# `<package>.sig`: an Ed25519 signature of exactly what update.rs's signed_statement() rebuilds —
+# `<package>.sig`: an Ed25519 signature of exactly what update/package.rs's signed_statement() rebuilds —
 # the version, the package's name and its SHA-256 — checked here with the public key before going out.
 set -eu
 
@@ -15,7 +15,7 @@ key="$work/key.pem"
 
 # The key must be the one RDM trusts.
 public=$(openssl pkey -in "$key" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
-grep -q "\"$public\"" crates/app/src/update.rs || { echo "::error::RDM_SIGNING_KEY does not match update.rs's PUBLIC_KEY"; exit 1; }
+grep -q "\"$public\"" crates/app/src/update/package.rs || { echo "::error::RDM_SIGNING_KEY does not match update/package.rs's PUBLIC_KEY"; exit 1; }
 openssl pkey -in "$key" -pubout -out "$work/key.pub"
 
 signed=0

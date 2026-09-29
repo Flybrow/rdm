@@ -177,6 +177,15 @@ fn signature_valid(message: &[u8], signature: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    /// The release workflow checks its signing key against `PUBLIC_KEY` in this very file, by its
+    /// path: moved without the script, every release was refused (0.3.9's first tag).
+    #[test]
+    fn the_release_workflow_looks_for_the_key_here() {
+        let script = include_str!("../../../../.github/sign-packages.sh");
+        let here = file!().replace('\\', "/");
+        assert!(script.contains(&format!("grep -q \"\\\"$public\\\"\" {here}")), "sign-packages.sh must read {here}");
+    }
+
     #[test]
     fn signatures_are_checked_against_the_release_key() {
         // Made with the release key exactly as the release workflow does (`openssl pkeyutl -sign
