@@ -325,9 +325,9 @@ impl App<'_> {
 
     /// A download sent by the browser waits for the user's go-ahead (`confirm_browser`).
     pub(super) fn confirm_prompt(&mut self, ctx: &Context) {
-        let Some((url, filename, exists, waiting)) = self.manager.to_confirm() else { return };
+        let Some(crate::manager::ToConfirm { url, name, ask_existing: exists, confirming, waiting }) = self.manager.to_confirm() else { return };
         let p = Palette::from_ctx(ctx);
-        let name = filename.unwrap_or_else(|| engine::suggest_file_name(&url, None));
+        let name = name.unwrap_or_else(|| engine::suggest_file_name(&url, None));
         // None: cancel; Some(existing): download, with that answer if the file is already there.
         let mut answer: Option<Option<ExistingFile>> = None;
         let mut cancel = false;
@@ -339,7 +339,13 @@ impl App<'_> {
             } else {
                 tr!("Envoyé par le navigateur", "Sent by the browser").to_owned()
             };
-            if dialog_header(ui, &p, icon::DOWNLOAD_SIMPLE, p.accent, tr!("Nouveau téléchargement", "New download"), &subtitle) {
+            // Only there for the file already in the folder (no confirmation of every download).
+            let (title, subtitle) = if confirming {
+                (tr!("Nouveau téléchargement", "New download"), subtitle)
+            } else {
+                (tr!("Le fichier existe déjà", "The file already exists"), tr!("Que voulez-vous faire ?", "What do you want to do?").to_owned())
+            };
+            if dialog_header(ui, &p, icon::DOWNLOAD_SIMPLE, p.accent, title, &subtitle) {
                 cancel = true;
             }
             ui.add_space(14.0);
@@ -359,13 +365,15 @@ impl App<'_> {
                     .color(p.warning),
                 );
             }
-            ui.add_space(12.0);
-            toggle(
-                ui,
-                &mut self.confirm_always,
-                tr!("Ne plus demander", "Don't ask again"),
-                tr!("Réactivable dans les paramètres", "Can be turned back on in the settings"),
-            );
+            if confirming {
+                ui.add_space(12.0);
+                toggle(
+                    ui,
+                    &mut self.confirm_always,
+                    tr!("Ne plus demander", "Don't ask again"),
+                    tr!("Réactivable dans les paramètres", "Can be turned back on in the settings"),
+                );
+            }
             ui.add_space(16.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if exists {
@@ -502,6 +510,7 @@ fn settings_form(
                     ui,
                     &mut s.existing,
                     &[
+                        (ExistingFile::Ask, icon::CHAT_CIRCLE, tr!("Demander", "Ask")),
                         (ExistingFile::Rename, icon::COPY, tr!("Renommer", "Rename")),
                         (ExistingFile::Overwrite, icon::ARROWS_CLOCKWISE, tr!("Remplacer", "Overwrite")),
                         (ExistingFile::Skip, icon::PROHIBIT, tr!("Ignorer", "Skip")),
@@ -511,10 +520,22 @@ fn settings_form(
                     ui,
                     p,
                     match s.existing {
+                        ExistingFile::Ask => tr!(
+                            "RDM passe au premier plan et vous laisse choisir : garder les deux fichiers, ou remplacer l'ancien.",
+                            "RDM comes to the front and lets you choose: keep both files, or replace the old one."
+                        ),
                         ExistingFile::Rename => tr!("Le nouveau fichier devient « nom (1).ext ».", "The new file becomes \"name (1).ext\"."),
                         ExistingFile::Overwrite => tr!("L'ancien fichier est remplacé par le nouveau.", "The old file is replaced by the new one."),
                         ExistingFile::Skip => tr!("Le lien n'est pas téléchargé de nouveau.", "The link is not downloaded again."),
                     },
+                );
+                note(
+                    ui,
+                    p,
+                    tr!(
+                        "S'applique à tous les téléchargements : du navigateur, des liens collés ou copiés.",
+                        "Applies to every download: from the browser, from pasted or copied links."
+                    ),
                 );
             });
 

@@ -89,12 +89,30 @@ impl AddRequest {
         Self { url, audio_url: None, filename: None, referrer: None, cookies: None, user_agent: None, existing: None }
     }
 
+    /// The request behind a download of the list, from its link and headers.
+    fn from_parts(url: Url, audio_url: Option<Url>, headers: &[(String, String)]) -> Self {
+        let get = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+        Self { audio_url, referrer: get("referer"), cookies: get("cookie"), user_agent: get("user-agent"), ..Self::from_url(url) }
+    }
+
     pub fn headers(&self) -> Vec<(String, String)> {
         [("referer", &self.referrer), ("cookie", &self.cookies), ("user-agent", &self.user_agent)]
             .into_iter()
             .filter_map(|(k, v)| Some((k.to_owned(), v.clone().filter(|v| !v.is_empty())?)))
             .collect()
     }
+}
+
+/// A download waiting for the user's answer, as the window shows it.
+pub struct ToConfirm {
+    pub url: Url,
+    /// Its name, when known.
+    pub name: Option<String>,
+    /// A file of that name is already there, and the user wants to be asked (`ExistingFile::Ask`).
+    pub ask_existing: bool,
+    /// Every browser download is confirmed (`confirm_browser`); otherwise only the file is asked about.
+    pub confirming: bool,
+    pub waiting: usize,
 }
 
 pub struct Entry {
@@ -942,9 +960,24 @@ impl Manager {
     /// A download from the browser extension: added at once, or first shown in the (raised)
     /// window for the user's go-ahead, as the settings say.
     pub fn add_from_browser(self: &Arc<Self>, req: AddRequest) {
-        if !self.with_settings(|s| s.confirm_browser) {
-            return self.add(req);
+        let (confirm, ask) = self.with_settings(|s| (s.confirm_browser, s.existing == ExistingFile::Ask));
+        let exists = req
+            .filename
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(engine::sanitize_file_name)
+            .is_some_and(|n| self.with_settings(|s| s.target_dir(&n)).join(&n).is_file());
+        // Without confirmation, still asked when the file is already there (`ExistingFile::Ask`).
+        if confirm || (ask && exists) {
+            self.wait_for_answer(req);
+        } else {
+            self.add(req);
         }
+    }
+
+    /// Shown in the (raised) window until the user answers (see `to_confirm`).
+    fn wait_for_answer(&self, req: AddRequest) {
         {
             let mut waiting = lock(&self.to_confirm);
             if waiting.iter().any(|w| w.url == req.url) {
@@ -959,14 +992,14 @@ impl Manager {
         self.repaint();
     }
 
-    /// The first browser download waiting for the user's go-ahead: its link, its name (when the
-    /// page gave one), whether a file of that name is already in its folder, and how many wait.
-    pub fn to_confirm(&self) -> Option<(Url, Option<String>, bool, usize)> {
+    /// The first download waiting for the user's answer.
+    pub fn to_confirm(&self) -> Option<ToConfirm> {
         let waiting = lock(&self.to_confirm);
         let req = waiting.front()?;
         let name = req.filename.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(engine::sanitize_file_name);
+        let (confirming, ask) = self.with_settings(|s| (s.confirm_browser, s.existing == ExistingFile::Ask));
         let exists = name.as_deref().is_some_and(|n| self.with_settings(|s| s.target_dir(n)).join(n).is_file());
-        Some((req.url.clone(), name, exists, waiting.len()))
+        Some(ToConfirm { url: req.url.clone(), name, ask_existing: ask && exists, confirming, waiting: waiting.len() })
     }
 
     /// The user answered for the first waiting download: `download` it or not, with `existing`
@@ -1033,6 +1066,21 @@ impl Manager {
         let settings = self.settings();
         let mut entries = lock(&self.entries);
         let Some(i) = entries.iter().position(|e| e.download.id == id) else { return };
+        // Its name known at last (a pasted or copied link): a file of that name already there is
+        // the user's to decide, before anything is written (`ExistingFile::Ask`).
+        let final_name = name.clone().unwrap_or_else(|| entries[i].name.clone());
+        if settings.existing == ExistingFile::Ask
+            && matches!(entries[i].download.status(), Status::Queued)
+            && settings.target_dir(&final_name).join(&final_name).is_file()
+        {
+            let e = entries.remove(i);
+            drop(entries);
+            let mut req = AddRequest::from_parts(e.download.url.clone(), e.download.audio.clone(), &e.headers);
+            req.filename = Some(final_name);
+            self.wait_for_answer(req);
+            self.changed();
+            return;
+        }
         if let Some(name) = name.filter(|n| *n != entries[i].name)
             && matches!(entries[i].download.status(), Status::Queued | Status::Paused)
         {
@@ -1970,7 +2018,8 @@ fn target_for(settings: &Settings, name: &str, taken: &[Entry], except: Option<D
     let dir = settings.target_dir(name);
     let path = dir.join(name);
     match settings.existing {
-        ExistingFile::Rename => Some(unique_path(&dir, name, taken, except)),
+        // Asked beforehand when possible (see `resolved`, `add_from_browser`); otherwise a new name.
+        ExistingFile::Rename | ExistingFile::Ask => Some(unique_path(&dir, name, taken, except)),
         ExistingFile::Skip if path.is_file() => None,
         ExistingFile::Skip => Some(unique_path(&dir, name, taken, except)),
         ExistingFile::Overwrite => {

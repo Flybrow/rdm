@@ -36,8 +36,10 @@ pub enum ClipboardMode {
 /// A file of the same name is already in the destination folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ExistingFile {
-    /// `name (1).ext`.
+    /// RDM asks each time (raised window): keep both, or replace. Where it cannot ask, it renames.
     #[default]
+    Ask,
+    /// `name (1).ext`.
     Rename,
     Overwrite,
     /// Not downloaded again.
@@ -147,7 +149,7 @@ impl Default for Settings {
             auto_update: false,
             language: Language::Auto,
             clipboard: ClipboardMode::Ask,
-            existing: ExistingFile::Rename,
+            existing: ExistingFile::Ask,
             proxy: Proxy::default(),
         }
     }
@@ -338,6 +340,6 @@ mod tests {
         let s: Settings = serde_json::from_str(newer).unwrap();
         assert_eq!((s.connections, s.theme, s.language), (7, Theme::System, Language::Auto));
         assert_eq!((s.proxy.mode, s.proxy.url.as_str()), (ProxyMode::System, "http://p:1"), "only the unknown mode falls back");
-        assert!(s.queues.is_empty() && s.existing == ExistingFile::Rename);
+        assert!(s.queues.is_empty() && s.existing == ExistingFile::Ask);
     }
 }
