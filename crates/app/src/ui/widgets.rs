@@ -291,7 +291,10 @@ pub fn field(ui: &mut Ui, id: Id, text: &mut String, hint: &str, glyph: &str, wi
 /// Label on the left, iOS-style switch on the right; the whole row toggles.
 pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str, detail: &str) -> Response {
     let p = Palette::of(ui);
-    let height = if detail.is_empty() { 34.0 } else { 48.0 };
+    // The detail wraps before the switch (a long one would run under it and out of the window).
+    let text_width = (ui.available_width() - 64.0).max(80.0);
+    let detail_galley = (!detail.is_empty()).then(|| ui.painter().layout(detail.to_owned(), theme::regular(12.0), p.muted, text_width));
+    let height = detail_galley.as_ref().map_or(34.0, |g| (34.0 + g.size().y).max(48.0));
     let (rect, mut response) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
     if response.clicked() {
         *on = !*on;
@@ -300,11 +303,14 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str, detail: &str) -> Response
     let t = ui.ctx().animate_bool_with_time(response.id, *on, 0.16);
     let painter = ui.painter();
     let text_x = rect.left();
-    if detail.is_empty() {
-        painter.text(pos2(text_x, rect.center().y), Align2::LEFT_CENTER, label, theme::regular(14.0), p.text);
-    } else {
-        painter.text(pos2(text_x, rect.top() + 14.0), Align2::LEFT_CENTER, label, theme::regular(14.0), p.text);
-        painter.text(pos2(text_x, rect.top() + 34.0), Align2::LEFT_CENTER, detail, theme::regular(12.0), p.muted);
+    match detail_galley {
+        None => {
+            painter.text(pos2(text_x, rect.center().y), Align2::LEFT_CENTER, label, theme::regular(14.0), p.text);
+        }
+        Some(galley) => {
+            painter.text(pos2(text_x, rect.top() + 14.0), Align2::LEFT_CENTER, label, theme::regular(14.0), p.text);
+            painter.galley(pos2(text_x, rect.top() + 26.0), galley, p.muted);
+        }
     }
     let track = Rect::from_center_size(pos2(rect.right() - 22.0, rect.center().y), vec2(42.0, 24.0));
     if t > 0.0 {
