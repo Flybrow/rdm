@@ -440,6 +440,8 @@ struct App<'a> {
     unsaved_since: Option<Instant>,
     /// Reveal the VirusTotal key in the settings.
     show_key: bool,
+    /// The settings tab shown (the last one used, while RDM runs).
+    settings_tab: dialogs::SettingsTab,
     /// The settings were opened to ask for the VirusTotal key.
     asking_key: bool,
     /// The browser-extension window, while open.
@@ -486,6 +488,7 @@ impl<'a> App<'a> {
             secrets: None,
             unsaved_since: None,
             show_key: false,
+            settings_tab: dialogs::SettingsTab::default(),
             asking_key: false,
             report: None,
             browsers: None,
