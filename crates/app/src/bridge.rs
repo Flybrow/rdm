@@ -51,6 +51,7 @@ pub async fn serve(manager: Arc<Manager>, listener: TcpListener) {
         .route("/ping", get(ping_read).post(ping))
         .route("/config", get(config))
         .route("/uninstalled", post(uninstalled))
+        .route("/installed", post(installed))
         .route("/add", post(add))
         .route("/probe", post(probe))
         .route("/check", post(check))
@@ -171,6 +172,19 @@ async fn uninstalled(State(manager): State<Arc<Manager>>, headers: HeaderMap) ->
 
 fn browser_of(headers: &HeaderMap) -> Option<&str> {
     headers.get(BROWSER).and_then(|v| v.to_str().ok())
+}
+
+#[derive(Serialize)]
+struct Installed {
+    /// RDM opened the browser to install the extension: the tab it opened can be closed.
+    close_tab: bool,
+}
+
+/// The extension has just been installed (or updated).
+async fn installed(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> Result<Json<Installed>, StatusCode> {
+    guard(&manager, &headers)?;
+    let browser = headers.get(BROWSER).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    Ok(Json(Installed { close_tab: manager.installed_by_rdm(browser) }))
 }
 
 async fn add(State(manager): State<Arc<Manager>>, headers: HeaderMap, Json(req): Json<AddRequest>) -> StatusCode {

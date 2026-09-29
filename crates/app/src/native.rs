@@ -93,7 +93,7 @@ const REFUSED: u16 = 2;
 fn route(method: Method, path: &str) -> Option<bool> {
     match (method, path) {
         (Method::Get | Method::Post, "/ping") | (Method::Get, "/config") => Some(false),
-        (Method::Post, "/probe" | "/check" | "/pair" | "/uninstalled" | "/youtube/state" | "/youtube/install" | "/youtube/extract") => Some(false),
+        (Method::Post, "/probe" | "/check" | "/pair" | "/installed" | "/uninstalled" | "/youtube/state" | "/youtube/install" | "/youtube/extract") => Some(false),
         // Explicit actions of the user: RDM starts if needed.
         (Method::Post, "/add" | "/show" | "/record/start") => Some(true),
         _ => None,

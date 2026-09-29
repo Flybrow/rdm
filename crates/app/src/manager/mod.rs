@@ -456,6 +456,9 @@ pub struct Manager {
     installs: Mutex<HashMap<Browser, Install>>,
     /// Browsers the user added by their executable (portable ones, or any Windows does not list).
     custom_browsers: Mutex<Vec<PathBuf>>,
+    /// Browsers RDM just opened on the extension's package or page, and when: the tab it opened is
+    /// closed once the extension is installed (see `Manager::installed_by_rdm`).
+    opened_to_install: Mutex<HashMap<String, Instant>>,
 }
 
 const BROWSERS_FILE: &str = "browsers.json";
@@ -464,6 +467,8 @@ const UNINSTALLS_FILE: &str = "uninstalls.json";
 const UNINSTALL_TTL_SECS: u64 = 24 * 3600;
 /// Browsers added by hand (see `Manager::add_browser`).
 const CUSTOM_BROWSERS_FILE: &str = "custom_browsers.json";
+/// How long after RDM opened a browser to install the extension its tab is still taken as RDM's.
+const INSTALL_TAB_TTL: Duration = Duration::from_secs(15 * 60);
 /// Messages kept for the window while it is closed.
 const MAX_NOTICES: usize = 20;
 
@@ -603,6 +608,7 @@ impl Manager {
                     .and_then(|b| serde_json::from_slice(&b).ok())
                     .unwrap_or_default(),
             ),
+            opened_to_install: Mutex::default(),
         });
         this.spawn_ticker();
         this.spawn_update_checks();
@@ -834,6 +840,12 @@ impl Manager {
         lock(&self.installs).values().any(|i| matches!(i, Install::Working))
     }
 
+    /// The extension just installed in the browser named `key`: whether RDM opened that browser
+    /// for it a moment ago (then the tab it opened can go). Answered once.
+    pub fn installed_by_rdm(&self, key: &str) -> bool {
+        lock(&self.opened_to_install).remove(key).is_some_and(|at| at.elapsed() < INSTALL_TAB_TTL)
+    }
+
     pub fn install_state(&self, browser: Browser) -> Option<Install> {
         lock(&self.installs).get(&browser).cloned()
     }
@@ -851,6 +863,9 @@ impl Manager {
                 Ok(done) => Install::Done(done),
                 Err(reason) => Install::Failed(reason),
             };
+            if matches!(&state, Install::Done(done) if done.launched) {
+                lock(&this.opened_to_install).insert(browser.key().to_owned(), Instant::now());
+            }
             lock(&this.installs).insert(browser, state);
             this.repaint();
         });

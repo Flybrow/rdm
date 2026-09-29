@@ -517,8 +517,24 @@ function start() {
   checkIn();
 }
 
-ext.runtime.onInstalled.addListener(() => {
+/**
+ * Just installed from RDM's extension window: the tab RDM opened for it (the package, or the
+ * extensions page) is closed. Only when RDM says it opened one a moment ago, and only the tab in
+ * front if it is that page: its address is hidden from extensions (a browser page), or it is the
+ * package. An installation from a store leaves its page alone.
+ */
+async function closeInstallTab() {
+  const res = await call("/installed", { method: "POST" });
+  if (!answered(res) || !res.ok) return;
+  const { close_tab: close } = await res.json().catch(() => ({}));
+  if (close !== true) return;
+  const [tab] = await ext.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+  if (tab?.id != null && (!tab.url || /rdm-firefox[^/]*\.xpi$/i.test(tab.url))) ext.tabs.remove(tab.id).catch(() => {});
+}
+
+ext.runtime.onInstalled.addListener(({ reason }) => {
   start();
+  if (reason === "install" || reason === "update") closeInstallTab();
   ext.contextMenus
     .removeAll()
     .then(() => ext.contextMenus.create({ id: "rdm", title: t("menuDownload"), contexts: ["link", "video", "audio"] }));
