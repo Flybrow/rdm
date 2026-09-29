@@ -152,7 +152,7 @@ impl Manager {
     /// Has VirusTotal analyse a finished file (looked up by hash first, uploaded only if unknown),
     /// entirely in the background; the verdict lands in the entry and in a desktop notification.
     pub fn scan_virustotal(self: &Arc<Self>, id: DownloadId) -> Result<(), ScanRefused> {
-        let key = self.with_settings(|s| s.virustotal_key.clone());
+        let key = lock(&self.secrets).virustotal_key.clone();
         if key.is_empty() {
             return Err(ScanRefused::NoKey);
         }

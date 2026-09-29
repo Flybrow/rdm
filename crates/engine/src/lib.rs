@@ -42,8 +42,10 @@ pub async fn run(
     progress: Arc<Progress>,
     cancel: CancellationToken,
 ) -> Result<Outcome, EngineError> {
+    // Boxed: two transfers side by side make a large future, which every download's task would
+    // otherwise carry.
     let result = match &job.audio {
-        Some(audio) => merged::run(client, job, audio, progress, cancel).await,
+        Some(audio) => Box::pin(merged::run(client, job, audio, progress, cancel)).await,
         None => transfer::run(client, job, progress, cancel).await,
     };
     match result {
@@ -307,8 +309,20 @@ pub(crate) fn state_path(target: &Path) -> PathBuf {
     with_suffix(target, STATE_SUFFIX)
 }
 
+/// Writes `bytes` to `path` atomically (temp file + rename, data synced first): a crash mid-write
+/// never leaves a torn file.
+pub(crate) async fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let tmp = with_suffix(path, ".tmp");
+    let mut file = tokio::fs::File::create(&tmp).await?;
+    file.write_all(bytes).await?;
+    file.sync_all().await?;
+    drop(file);
+    tokio::fs::rename(tmp, path).await
+}
+
 /// `path` + `suffix`, without treating anything as an extension (`a.mp4` → `a.mp4.rdm`).
-pub(crate) fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut p = path.as_os_str().to_owned();
     p.push(suffix);
     p.into()
@@ -338,5 +352,15 @@ mod tests {
                 assert!(client_with(&ClientOptions { route, ..ClientOptions::default() }).is_ok(), "{url} {user}");
             }
         }
+    }
+
+    /// Regression: a download's task held the future of a split (video + audio) download inline,
+    /// 128 KB whatever the download, because nested futures are laid out side by side.
+    #[test]
+    fn a_download_task_stays_small() {
+        let client = client().unwrap();
+        let job = Job::new("https://x.io/a".parse().unwrap(), "a".into());
+        let task = run(&client, &job, Arc::default(), CancellationToken::new());
+        assert!(size_of_val(&task) < 8 << 10, "{} bytes", size_of_val(&task));
     }
 }

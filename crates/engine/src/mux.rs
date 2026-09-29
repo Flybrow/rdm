@@ -340,7 +340,9 @@ pub fn merge(video: &Path, audio: &Path, out: &Path) -> Result<(), MuxError> {
     let written = File::create(&tmp).map_err(MuxError::from).and_then(|file| {
         let mut w = BufWriter::with_capacity(1 << 20, file);
         merge_bytes(&v, &a, &mut w)?;
-        Ok(w.flush()?) // the file is closed here, before the rename (required on Windows)
+        // On disk before it takes the final name: the parts are deleted next, and a power cut must
+        // not leave an empty file in their place. Closed here, before the rename (Windows needs it).
+        Ok(w.into_inner().map_err(std::io::IntoInnerError::into_error)?.sync_all()?)
     });
     match written {
         Ok(()) => Ok(std::fs::rename(&tmp, out)?),

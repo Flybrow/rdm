@@ -476,7 +476,7 @@ async fn fetch(client: &reqwest::Client, version: &str, package: &Package, path:
     if total > 0 && received != total {
         return Err(Retry(tr!("paquet incomplet", "incomplete package").into()));
     }
-    let digest: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let digest = crate::manager::checksum::hex(&hash.finalize());
     if package.sha256.as_ref().is_some_and(|expected| *expected != digest) {
         return Err(Retry(tr!("paquet corrompu (empreinte SHA-256 différente)", "corrupted package (SHA-256 mismatch)").into()));
     }

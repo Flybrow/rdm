@@ -1,9 +1,12 @@
-//! Passwords — site logins, the proxy's — kept apart from `settings.json`: on Windows encrypted
-//! with DPAPI (only this Windows account can decrypt them), on Linux in a file only the user can
-//! read (0600, like `~/.netrc`). Never shown in the list, never sent anywhere but to their site.
+//! Passwords — site logins, the proxy's, the VirusTotal API key — kept apart from `settings.json`:
+//! on Windows encrypted with DPAPI (only this Windows account can decrypt them), on Linux in a file
+//! only the user can read (0600, like `~/.netrc`). Never shown in the list, never sent anywhere but
+//! to their site.
 
 use serde::{Deserialize, Serialize};
 use url::Url;
+
+use crate::settings::Settings;
 
 const FILE: &str = "secrets.bin";
 
@@ -12,6 +15,8 @@ const FILE: &str = "secrets.bin";
 pub struct Secrets {
     pub sites: Vec<SiteLogin>,
     pub proxy_password: String,
+    /// The user's own (free) VirusTotal API key; empty = not set up.
+    pub virustotal_key: String,
 }
 
 /// HTTP login for a site: sent (Basic) to `host` and its subdomains.
@@ -32,17 +37,32 @@ impl Secrets {
             .unwrap_or_default()
     }
 
-    pub fn save(&self) {
-        let Ok(plain) = serde_json::to_vec(self) else { return };
-        let Some(sealed) = imp::seal(&plain) else { return };
+    /// `false` when they could not be written.
+    pub fn save(&self) -> bool {
+        let Ok(plain) = serde_json::to_vec(self) else { return false };
+        let Some(sealed) = imp::seal(&plain) else { return false };
         let path = crate::settings::config_file(FILE);
         if let Some(dir) = path.parent() {
             let _ = crate::settings::create_private_dir(dir);
         }
         let tmp = crate::settings::with_suffix(&path, ".tmp");
-        if crate::settings::write_private(&tmp, &sealed).is_ok() {
-            let _ = std::fs::rename(tmp, path);
+        crate::settings::write_private(&tmp, &sealed).and_then(|()| std::fs::rename(tmp, path)).is_ok()
+    }
+
+    /// RDM 0.3.7 and older kept the VirusTotal key in the settings, in clear: it moves here once
+    /// stored (`store`), and only then leaves the settings. `true` when the settings changed.
+    pub fn adopt_virustotal_key(&mut self, settings: &mut Settings, store: impl FnOnce(&Self) -> bool) -> bool {
+        if settings.virustotal_key.is_empty() {
+            return false;
         }
+        if self.virustotal_key.is_empty() {
+            self.virustotal_key = settings.virustotal_key.clone();
+            if !store(self) {
+                return false; // kept in the settings meanwhile: not lost
+            }
+        }
+        settings.virustotal_key.clear();
+        true
     }
 
     /// The login saved for `url`'s host (or a parent domain), the most specific first.
@@ -153,6 +173,23 @@ mod tests {
         // Written with its scheme, the more specific site still wins.
         let s = Secrets { sites: vec![login("http://files.example.com", "b"), login("example.com", "a")], ..Default::default() };
         assert_eq!(s.login_for(&url("http://files.example.com/x")).unwrap().user, "b");
+    }
+
+    #[test]
+    fn the_virustotal_key_leaves_the_settings_once_stored() {
+        let key = "a".repeat(64);
+        let with_key = || Settings { virustotal_key: key.clone(), ..Settings::default() };
+        let (mut settings, mut secrets) = (with_key(), Secrets::default());
+        assert!(!secrets.adopt_virustotal_key(&mut settings, |_| false), "not stored: stays where it was");
+        assert_eq!(settings.virustotal_key, key);
+        let mut settings = with_key();
+        assert!(Secrets::default().adopt_virustotal_key(&mut settings, |s| s.virustotal_key == key));
+        assert!(settings.virustotal_key.is_empty());
+        assert!(!serde_json::to_string(&settings).unwrap().contains("virustotal_key"), "no longer written in clear");
+        // Already moved (an older RDM ran again meanwhile): the settings' copy just goes.
+        let (mut settings, mut secrets) = (with_key(), Secrets { virustotal_key: "b".repeat(64), ..Secrets::default() });
+        assert!(secrets.adopt_virustotal_key(&mut settings, |_| panic!("nothing to store")));
+        assert_eq!(secrets.virustotal_key, "b".repeat(64));
     }
 
     #[test]

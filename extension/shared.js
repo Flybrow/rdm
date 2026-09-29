@@ -40,10 +40,16 @@ export const isMediaUrl = (url) => MEDIA_EXTENSIONS.has(extOf(pathOf(url)));
 // MPEG-TS fragments and DASH manifests are pieces of a stream, not standalone media.
 export const isMediaType = (type = "") => /^(video|audio)\//i.test(type) && !/mp2t|mpegurl|dash/i.test(type);
 
-/** Registrable-domain approximation (last two labels), enough to tell same-site from cross-site. */
+/**
+ * Registrable-domain approximation, as RDM's `net::same_site`: the last two labels, three under a
+ * country's second level (`bbc.co.uk`, not `co.uk`: stricter when in doubt).
+ */
 export const siteOf = (url) => {
   try {
-    return new URL(url).hostname.split(".").slice(-2).join(".");
+    const labels = new URL(url).hostname.replace(/\.$/, "").split(".");
+    const [second = "", tld = ""] = labels.slice(-2);
+    const keep = labels.length > 2 && tld.length === 2 && second.length <= 3 ? 3 : 2;
+    return labels.slice(-keep).join(".");
   } catch {
     return "";
   }

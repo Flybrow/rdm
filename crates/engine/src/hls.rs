@@ -130,8 +130,8 @@ pub(crate) async fn run(
         return download(&http, video, &job.target, n, &progress, &cancel).await;
     };
     let split = Split::new(&job.target, &cancel);
-    let v = download(&http, video, &split.video, n, &split.progress[0], &split.stop);
-    let a = async {
+    let v = Box::pin(download(&http, video, &split.video, n, &split.progress[0], &split.stop));
+    let a = Box::pin(async {
         let playlist = tokio::select! {
             biased;
             () = split.stop.cancelled() => return Ok(Outcome::Paused),
@@ -141,7 +141,7 @@ pub(crate) async fn run(
             return Err(EngineError::Playlist("nested master playlist"));
         };
         download(&http, parts, &split.audio, (n / 4).max(1), &split.progress[1], &split.stop).await
-    };
+    });
     split.finish(&progress, &job.target, v, a).await
 }
 
@@ -250,12 +250,7 @@ async fn download(
 }
 
 async fn save_state(state: &Path, resume: &Resume) -> std::io::Result<()> {
-    let tmp = state.with_extension("rdm.tmp");
-    let mut file = fs::File::create(&tmp).await?;
-    file.write_all(&serde_json::to_vec(resume)?).await?;
-    file.sync_all().await?;
-    drop(file);
-    fs::rename(tmp, state).await
+    crate::write_atomic(state, &serde_json::to_vec(resume)?).await
 }
 
 async fn load(http: &Http<'_>, url: &Url) -> Result<Playlist, EngineError> {

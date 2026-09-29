@@ -282,10 +282,9 @@ impl Growth {
     }
 }
 
-/// The connection counts servers accepted, shared by every download (and its retries): a new
-/// download from a server that refuses more than 4 connections starts with 4, instead of being
-/// refused (and maybe penalized) again.
-/// What is known of a server.
+/// What is known of a server, shared by every download (and its retries): a new download from a
+/// server that refuses more than 4 connections starts with 4, instead of being refused (and maybe
+/// penalized) again.
 #[derive(Debug, Clone, Copy)]
 struct Known {
     /// The connections it accepted (`usize::MAX`: no refusal seen).

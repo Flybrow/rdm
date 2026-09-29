@@ -32,13 +32,10 @@ pub fn register() {
 
 /// At most one every few seconds: finishing a batch of small files must not spam the desktop.
 pub fn completed(file_name: &str) {
-    use std::{
-        sync::atomic::{AtomicU64, Ordering::Relaxed},
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
     static LAST: AtomicU64 = AtomicU64::new(0);
     const QUIET_SECS: u64 = 3;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let now = crate::manager::unix_now();
     if now.saturating_sub(LAST.swap(now, Relaxed)) < QUIET_SECS {
         return;
     }

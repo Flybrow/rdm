@@ -353,7 +353,7 @@ pub fn launch(exe: &Path, target: &str) -> io::Result<()> {
 }
 
 /// A minimal ZIP archive (stored, no compression): enough for an `.xpi`, no extra dependency.
-fn zip<'a>(files: impl Iterator<Item = (&'a str, &'a [u8])>) -> Vec<u8> {
+pub(crate) fn zip<'a>(files: impl Iterator<Item = (&'a str, &'a [u8])>) -> Vec<u8> {
     let (mut out, mut central, mut count) = (Vec::new(), Vec::new(), 0u16);
     for (name, data) in files {
         let (crc, size, offset) = (crc32(data), data.len() as u32, out.len() as u32);

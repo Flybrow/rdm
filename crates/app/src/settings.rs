@@ -106,7 +106,9 @@ pub struct Settings {
     pub notify: bool,
     #[serde(deserialize_with = "lenient")]
     pub theme: Theme,
-    /// The user's own (free) VirusTotal API key; empty = not set up.
+    /// Where RDM 0.3.7 and older kept the VirusTotal key: now with the passwords (`secrets`), moved
+    /// there at start. Written back only if that move failed.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub virustotal_key: String,
     /// Look for a new release on GitHub at start and once a day.
     pub check_updates: bool,
@@ -172,10 +174,7 @@ where
 
 impl Settings {
     pub fn load() -> Self {
-        let mut s: Self = fs::read(config_file(FILE))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let mut s: Self = load_json(FILE);
         s.sanitize();
         s
     }
@@ -232,6 +231,20 @@ pub fn config_file(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// A JSON file of the settings folder; the default when there is none. A file this version cannot
+/// read (damaged) is kept aside as `<name>.bad` rather than overwritten by the next save.
+pub fn load_json<T: serde::de::DeserializeOwned + Default>(name: &str) -> T {
+    load_json_at(&config_file(name))
+}
+
+fn load_json_at<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path) -> T {
+    let Ok(bytes) = fs::read(path) else { return T::default() };
+    serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+        let _ = fs::copy(path, with_suffix(path, ".bad"));
+        T::default()
+    })
+}
+
 /// Atomic write (temp file + rename), serialized: concurrent saves from the UI and download
 /// threads can neither interleave in the temp file nor leave a truncated config after a crash.
 pub fn save_json(name: &str, value: &impl Serialize) {
@@ -254,8 +267,7 @@ pub fn save_json(name: &str, value: &impl Serialize) {
 }
 
 /// RDM's settings folder, private to the user on Linux (0700, like `~/.ssh`): the download list
-/// holds links with their access tokens, the settings the VirusTotal key. Windows: the profile
-/// folder is private already.
+/// holds links with their access tokens. Windows: the profile folder is private already.
 pub fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -289,12 +301,7 @@ pub fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()>
     f.sync_all()
 }
 
-/// `path` + `suffix`, without treating anything as an extension (`a.mp4` → `a.mp4.rdm`).
-pub fn with_suffix(path: &std::path::Path, suffix: &str) -> PathBuf {
-    let mut p = path.as_os_str().to_owned();
-    p.push(suffix);
-    p.into()
-}
+pub use engine::with_suffix;
 
 #[cfg(test)]
 mod tests {
@@ -324,6 +331,20 @@ mod tests {
         fs::set_permissions(&nested, fs::Permissions::from_mode(0o755)).unwrap();
         create_private_dir(&nested).unwrap();
         assert_eq!(fs::metadata(&nested).unwrap().permissions().mode() & 0o777, 0o700, "an older, readable one is fixed");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_damaged_file_is_kept_aside() {
+        let dir = std::env::temp_dir().join(format!("rdm-load-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        assert_eq!(load_json_at::<Vec<u32>>(&path), Vec::<u32>::new(), "none yet: the default");
+        fs::write(&path, b"[1, 2").unwrap();
+        assert_eq!(load_json_at::<Vec<u32>>(&path), Vec::<u32>::new());
+        assert_eq!(fs::read(with_suffix(&path, ".bad")).unwrap(), b"[1, 2", "kept for the user");
+        fs::write(&path, b"[1, 2]").unwrap();
+        assert_eq!(load_json_at::<Vec<u32>>(&path), [1, 2]);
         let _ = fs::remove_dir_all(&dir);
     }
 

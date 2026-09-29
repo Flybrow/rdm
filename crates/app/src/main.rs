@@ -38,7 +38,8 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     // Before anything can speak: messages (even the update assistant's) in the chosen language.
-    i18n::set(settings::Settings::load().language);
+    let settings = settings::Settings::load();
+    i18n::set(settings.language);
     // A copy of RDM started to install an update once RDM has quit (see `update`).
     if update::run_assistant(&args) {
         return Ok(());
@@ -79,7 +80,7 @@ fn main() -> eframe::Result {
     std::thread::spawn(extension::refresh_installed);
     std::thread::spawn(update::clean_leftovers);
     std::thread::spawn(native::register);
-    let manager = Manager::new(rt.handle().clone(), engine::client().expect("http client"));
+    let manager = Manager::new(rt.handle().clone(), engine::client().expect("http client"), settings);
     if let Some(url) = url_arg {
         manager.add(AddRequest::from_url(url));
     }

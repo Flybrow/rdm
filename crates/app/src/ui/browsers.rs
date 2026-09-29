@@ -14,7 +14,7 @@ use super::{
 };
 use crate::{
     extension::{self, Browser, Flavour},
-    manager::{Install, Installed},
+    manager::{Install, Installed, unix_now},
     tr, trf,
 };
 
@@ -369,10 +369,6 @@ fn ago_text(secs: u64) -> String {
         3600..86_400 => format!("{} h", secs / 3600),
         _ => trf!("{} j", "{} d", secs / 86_400),
     }
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 /// Sidebar summary: which browsers are connected; opens the window. `true` when clicked.

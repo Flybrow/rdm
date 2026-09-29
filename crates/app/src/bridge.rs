@@ -2,6 +2,8 @@
 //!
 //! Threat model: any web page, any other browser extension, and any other account of the computer
 //! can send requests to 127.0.0.1. Defences:
+//! - the account: a connection from a program of another account is closed before it is read
+//!   (see `local::peer_is_mine`) — a program, unlike a browser, can forge any `Origin`;
 //! - `Origin`: browsers always set it on cross-origin requests; only *our* extension ID passes
 //!   (pinned by the manifest `key`); Firefox extensions have a random per-install origin: paired
 //!   by the native connector (`POST /pair`), or else accepted once the user approved it (Firefox
@@ -12,7 +14,11 @@
 //! - `Host`: must be the loopback address, which defeats DNS rebinding;
 //! - JSON bodies (force a CORS preflight we never answer), 64 KiB cap, http(s) URLs only.
 
-use std::{net::Ipv4Addr, sync::Arc, time::Duration};
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     Json, Router,
@@ -69,7 +75,30 @@ pub async fn serve(manager: Arc<Manager>, listener: TcpListener) {
         // Media chunks from the browser's player: the only route with large bodies.
         .route("/record/{token}/append", post(record_append).layer(DefaultBodyLimit::max(MAX_CHUNK)))
         .with_state(manager);
-    let _ = axum::serve(listener, app).await;
+    let _ = axum::serve(OwnAccount(listener), app).await;
+}
+
+/// The bridge's listener, letting in only the connections of this account's programs (browsers,
+/// the native connector, `rdm --quit`); the others are closed at once.
+struct OwnAccount(TcpListener);
+
+impl axum::serve::Listener for OwnAccount {
+    type Io = tokio::net::TcpStream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let port = self.0.local_addr().map_or(BRIDGE_PORT, |a| a.port());
+        loop {
+            let (io, peer) = axum::serve::Listener::accept(&mut self.0).await;
+            if local::peer_is_mine(peer, port) {
+                return (io, peer);
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.0.local_addr()
+    }
 }
 
 fn guard(manager: &Manager, headers: &HeaderMap) -> Result<(), StatusCode> {
@@ -523,6 +552,18 @@ mod tests {
         // An origin is judged as an origin, token or not.
         let web = h(&[("origin", "https://evil.example"), (local::TOKEN_HEADER, TOKEN)]);
         assert_eq!(guard_with(&web, TOKEN, Access::Read, |_| false), FORBIDDEN);
+    }
+
+    /// The account check lets this process's own requests through, end to end over HTTP.
+    #[tokio::test]
+    async fn the_users_own_programs_get_through() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new().route("/ping", get(|| async { "rdm" }));
+        tokio::spawn(async move { axum::serve(OwnAccount(listener), app).await });
+        let client = local_client().unwrap();
+        let answer = client.get(format!("http://127.0.0.1:{port}/ping")).send().await.unwrap().text().await.unwrap();
+        assert_eq!(answer, "rdm");
     }
 
     #[test]

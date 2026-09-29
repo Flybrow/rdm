@@ -65,6 +65,15 @@ fn split(checksum: &str) -> Option<(Algo, &str)> {
     Some((algo, hex))
 }
 
+/// Lower-case hexadecimal, the way checksums are written.
+pub fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
+}
+
 /// Hex digest of the file at `path` (read in 1 MiB blocks: any size, little memory).
 pub fn digest(path: &Path, algo: Algo) -> std::io::Result<String> {
     fn run<D: Digest>(path: &Path) -> std::io::Result<String> {
@@ -77,7 +86,7 @@ pub fn digest(path: &Path, algo: Algo) -> std::io::Result<String> {
                 n => hasher.update(&buf[..n]),
             }
         }
-        Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+        Ok(hex(&hasher.finalize()))
     }
     match algo {
         Algo::Md5 => run::<Md5>(path),
@@ -155,6 +164,12 @@ mod tests {
         assert!(parse("sha256:d41d8cd98f00b204e9800998ecf8427e").is_none(), "label and length disagree");
         assert!(parse("not a hash").is_none());
         assert!(parse("abc").is_none());
+    }
+
+    #[test]
+    fn hex_is_lower_case_two_digits_a_byte() {
+        assert_eq!(hex(&[0x00, 0x0f, 0xab, 0xff]), "000fabff");
+        assert_eq!(hex(&[]), "");
     }
 
     #[test]

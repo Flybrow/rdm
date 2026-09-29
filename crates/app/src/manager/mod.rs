@@ -34,7 +34,7 @@ use crate::{
     extension::{self, Browser, Flavour},
     notify,
     secrets::Secrets,
-    settings::{ExistingFile, Settings, save_json, with_suffix},
+    settings::{ExistingFile, Settings, load_json, save_json, with_suffix},
     tr, trf, update,
     virustotal::{self, Report, Stage},
 };
@@ -469,19 +469,22 @@ pub struct Installed {
 }
 
 impl Manager {
-    pub fn new(rt: Handle, fallback: Client) -> Arc<Self> {
+    /// `settings`: as loaded at start (their language already applied).
+    pub fn new(rt: Handle, fallback: Client, mut settings: Settings) -> Arc<Self> {
         if let Some(dir) = crate::settings::config_file(STORE).parent() {
             let _ = crate::settings::create_private_dir(dir);
         }
-        let settings = Settings::load();
-        crate::i18n::set(settings.language);
+        let mut secrets = Secrets::load();
+        if secrets.adopt_virustotal_key(&mut settings, Secrets::save) {
+            settings.save();
+        }
         let limit = Arc::new(RateLimit::default());
         limit.set(u64::from(settings.speed_limit_kib) * 1024);
         let this = Arc::new(Self {
             rt,
             fallback,
             clients: Mutex::default(),
-            secrets: Mutex::new(Secrets::load()),
+            secrets: Mutex::new(secrets),
             offer: Mutex::default(),
             to_confirm: Mutex::default(),
             own_copy: Mutex::default(),
@@ -507,25 +510,10 @@ impl Manager {
             web: Mutex::default(),
             scan_gate: Arc::new(Semaphore::new(1)),
             update: Mutex::default(),
-            browsers: Mutex::new(
-                fs::read(crate::settings::config_file(BROWSERS_FILE))
-                    .ok()
-                    .and_then(|b| serde_json::from_slice(&b).ok())
-                    .unwrap_or_default(),
-            ),
-            uninstalls: Mutex::new(
-                fs::read(crate::settings::config_file(UNINSTALLS_FILE))
-                    .ok()
-                    .and_then(|b| serde_json::from_slice(&b).ok())
-                    .unwrap_or_default(),
-            ),
+            browsers: Mutex::new(load_json(BROWSERS_FILE)),
+            uninstalls: Mutex::new(load_json(UNINSTALLS_FILE)),
             installs: Mutex::default(),
-            custom_browsers: Mutex::new(
-                fs::read(crate::settings::config_file(CUSTOM_BROWSERS_FILE))
-                    .ok()
-                    .and_then(|b| serde_json::from_slice(&b).ok())
-                    .unwrap_or_default(),
-            ),
+            custom_browsers: Mutex::new(load_json(CUSTOM_BROWSERS_FILE)),
             opened_to_install: Mutex::default(),
         });
         this.spawn_ticker();
@@ -1283,13 +1271,7 @@ impl Manager {
 /// RDM) are left out, not the whole list; an unreadable file is kept aside (`.bad`) rather than
 /// overwritten by the next save.
 fn load_entries() -> Vec<Entry> {
-    let path = crate::settings::config_file(STORE);
-    let Ok(bytes) = fs::read(&path) else { return Vec::new() };
-    let Ok(values) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) else {
-        let _ = fs::copy(&path, with_suffix(&path, ".bad"));
-        return Vec::new();
-    };
-    values
+    load_json::<Vec<serde_json::Value>>(STORE)
         .into_iter()
         .filter_map(|v| serde_json::from_value::<Stored>(v).ok())
         .map(|mut s| {
@@ -1453,7 +1435,8 @@ fn unique_path(dir: &Path, name: &str, taken: &[Entry], except: Option<DownloadI
         .expect("unbounded range always yields a free name")
 }
 
-fn unix_now() -> u64 {
+/// Seconds since 1970 (what the files of the settings folder record).
+pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 

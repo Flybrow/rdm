@@ -43,8 +43,8 @@ pub(crate) async fn run(
         headers: net::headers_for(&job.headers, &job.url, audio).into_owned(),
         ..job.clone()
     };
-    let v = transfer::run(client, &video_job, split.progress[0].clone(), split.stop.clone());
-    let a = transfer::run(client, &audio_job, split.progress[1].clone(), split.stop.clone());
+    let v = Box::pin(transfer::run(client, &video_job, split.progress[0].clone(), split.stop.clone()));
+    let a = Box::pin(transfer::run(client, &audio_job, split.progress[1].clone(), split.stop.clone()));
     split.finish(&progress, &job.target, v, a).await
 }
 

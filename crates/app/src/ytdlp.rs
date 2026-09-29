@@ -131,12 +131,12 @@ async fn setup() -> Result<(), String> {
     let client = engine::client().map_err(|e| e.to_string())?;
 
     let ytdlp = release_asset(&client, "yt-dlp/yt-dlp", "latest", YTDLP_ASSET).await?;
-    write_exe(&p.ytdlp, &ytdlp).await?;
+    let path = p.ytdlp.clone();
+    tokio::task::spawn_blocking(move || write_exe(&path, |out| std::io::Write::write_all(out, &ytdlp))).await.map_err(|e| e.to_string())??;
 
     let deno = release_asset(&client, "denoland/deno", "latest", DENO_ASSET).await?;
-    let exe = format!("deno{EXE}");
-    let deno_bin = tokio::task::spawn_blocking(move || unzip_one(&deno, &exe)).await.map_err(|e| e.to_string())??;
-    write_exe(&p.deno, &deno_bin).await?;
+    let path = p.deno.clone();
+    tokio::task::spawn_blocking(move || unzip_exe(&deno, &format!("deno{EXE}"), &path)).await.map_err(|e| e.to_string())??;
 
     let plugin = release_asset(&client, "Brainicism/bgutil-ytdlp-pot-provider", &format!("tags/{BGUTIL_TAG}"), BGUTIL_PLUGIN).await?;
     tokio::fs::write(p.plugins.join(BGUTIL_PLUGIN), &plugin).await.map_err(|e| io("cannot write", e))?;
@@ -193,36 +193,38 @@ async fn download(client: &reqwest::Client, url: &str, sha256: Option<&str>) -> 
     if bytes.len() as u64 > MAX_FILE {
         return Err("file abnormally large".into());
     }
-    let digest: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+    let digest = crate::manager::checksum::hex(&Sha256::digest(&bytes));
     if sha256.is_some_and(|expected| !expected.eq_ignore_ascii_case(&digest)) {
         return Err(format!("corrupted download (SHA-256 mismatch): {url}"));
     }
     Ok(bytes.to_vec())
 }
 
-async fn write_exe(path: &Path, data: &[u8]) -> Result<(), String> {
+/// Writes the program at `path` through a temporary file (`fill` writes its bytes), then puts it
+/// in place: a half-written program is never left under its name.
+fn write_exe(path: &Path, fill: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>) -> Result<(), String> {
     let tmp = crate::settings::with_suffix(path, ".tmp");
-    tokio::fs::write(&tmp, data).await.map_err(|e| format!("cannot write: {e}"))?;
+    let mut out = std::fs::File::create(&tmp).map_err(|e| format!("cannot write: {e}"))?;
+    fill(&mut out).map_err(|e| format!("cannot write: {e}"))?;
+    drop(out);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).await.map_err(|e| e.to_string())?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
     }
-    tokio::fs::rename(&tmp, path).await.map_err(|e| format!("cannot write (is it running?): {e}"))
+    std::fs::rename(&tmp, path).map_err(|e| format!("cannot write (is it running?): {e}"))
 }
 
 fn archive(data: &[u8]) -> Result<zip::ZipArchive<std::io::Cursor<&[u8]>>, String> {
     zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| format!("bad archive: {e}"))
 }
 
-/// The one file named `name` of a zip archive.
-fn unzip_one(data: &[u8], name: &str) -> Result<Vec<u8>, String> {
-    use std::io::Read;
+/// The one file named `name` of a zip archive, written as the program `path`: unpacked straight to
+/// disk (Deno's is over 100 MB), never whole in memory.
+fn unzip_exe(data: &[u8], name: &str, path: &Path) -> Result<(), String> {
     let mut zip = archive(data)?;
-    let mut file = zip.by_name(name).map_err(|e| format!("{name}: {e}"))?;
-    let mut out = Vec::new();
-    file.read_to_end(&mut out).map_err(|e| e.to_string())?;
-    Ok(out)
+    let mut entry = zip.by_name(name).map_err(|e| format!("{name}: {e}"))?;
+    write_exe(path, |out| std::io::copy(&mut entry, out).map(drop))
 }
 
 /// A GitHub source archive into `dest`, without its top folder (`<repo>-<tag>/`). Paths that
@@ -416,6 +418,19 @@ mod tests {
         assert!(audio.audio && !audio.video && audio.container == "mp4" && audio.size == 309288 && audio.bitrate == 129500);
         let video = &f.formats[1];
         assert!(video.video && !video.audio && video.height == 360 && video.label == "360p" && video.size == 1000);
+    }
+
+    #[test]
+    fn a_program_is_unpacked_into_place() {
+        let dir = std::env::temp_dir().join(format!("rdm-unzip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("deno");
+        let data = crate::extension::zip([("deno", b"\x7fELF program".as_slice()), ("README.md", b"docs".as_slice())].into_iter());
+        unzip_exe(&data, "deno", &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"\x7fELF program");
+        assert!(!crate::settings::with_suffix(&path, ".tmp").exists(), "nothing left beside it");
+        assert!(unzip_exe(&data, "missing", &path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

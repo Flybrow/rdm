@@ -46,6 +46,11 @@ test("site comparison for SameSite cookies", () => {
   assert.equal(siteOf("https://www.youtube.com/watch"), "youtube.com");
   assert.equal(siteOf("https://rr3---sn.googlevideo.com/x"), "googlevideo.com");
   assert.equal(siteOf("garbage"), "");
+  // Same cases as `sites_as_cookies_see_them` in RDM's `engine/src/net.rs`.
+  assert.equal(siteOf("https://www.bbc.co.uk/"), siteOf("https://media.bbc.co.uk/x"));
+  assert.notEqual(siteOf("https://www.bbc.co.uk/"), siteOf("https://evil.co.uk/"), "a country's second level is not a site");
+  assert.equal(siteOf("https://example.com/"), siteOf("https://EXAMPLE.com.:8443/x"));
+  assert.notEqual(siteOf("https://example.com/"), siteOf("https://example.com.evil.io/"));
 });
 
 test("file name of a Content-Disposition header", () => {

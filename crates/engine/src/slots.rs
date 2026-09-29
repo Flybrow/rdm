@@ -149,11 +149,12 @@ impl Slots {
     }
 
     pub fn downloaded(&self) -> u64 {
-        self.segments().iter().map(|s| s.pos.min(s.end.saturating_add(1)).saturating_sub(s.start)).sum()
+        self.lock().all.iter().map(|s| s.snapshot()).map(|s| s.pos.min(s.end.saturating_add(1)).saturating_sub(s.start)).sum()
     }
 
+    /// Asked each time a connection ends: read in place, no copy of the list.
     pub fn all_done(&self) -> bool {
-        self.segments().iter().all(Segment::is_done)
+        self.lock().all.iter().all(|s| s.snapshot().is_done())
     }
 
     /// At each tick (`dt` since the last one): each connection's speed and the typical one; then

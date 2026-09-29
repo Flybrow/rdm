@@ -17,7 +17,6 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{self, File, OpenOptions},
-    io::AsyncWriteExt,
     task::JoinSet,
     time::{Instant, MissedTickBehavior, interval_at},
 };
@@ -110,7 +109,7 @@ pub(crate) async fn run(
     };
     if info.hls {
         drop(first); // the playlist is read by the HLS engine
-        return crate::hls::run(client, job, progress, cancel).await;
+        return Box::pin(crate::hls::run(client, job, progress, cancel)).await;
     }
     pace.cap(speed_cap(Job::effective_limit(&job.limit, &job.own_limit)));
 
@@ -658,15 +657,9 @@ fn covers_exactly(mut segs: Vec<Segment>, size: u64) -> Option<Vec<Segment>> {
     (next == size).then_some(segs)
 }
 
-/// Atomic (temp + rename, data synced first): a crash mid-write never leaves a torn state file.
 async fn save_state(state: &Path, version: Option<&str>, segs: &[Segment]) -> std::io::Result<()> {
-    let tmp = state.with_extension("rdm.tmp");
-    let mut file = File::create(&tmp).await?;
     let saved = Saved { version: version.map(str::to_owned), segments: segs.to_vec() };
-    file.write_all(&serde_json::to_vec(&saved)?).await?;
-    file.sync_all().await?;
-    drop(file);
-    fs::rename(tmp, state).await
+    crate::write_atomic(state, &serde_json::to_vec(&saved)?).await
 }
 
 /// Counts itself in an `AtomicUsize` while alive.

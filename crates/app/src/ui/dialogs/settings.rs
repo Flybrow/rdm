@@ -167,7 +167,7 @@ fn settings_form(
         }
         SettingsTab::Browser => browser_tab(ui, p, s),
         SettingsTab::Security => {
-            security_tab(ui, p, s, secrets, key);
+            security_tab(ui, p, secrets, key);
             None
         }
         SettingsTab::Advanced => advanced_tab(ui, p, s, secrets, update_state),
@@ -406,7 +406,7 @@ fn browser_tab(ui: &mut Ui, p: &Palette, s: &mut Settings) -> Option<FormAction>
 }
 
 /// "Security": site logins and the VirusTotal key.
-fn security_tab(ui: &mut Ui, p: &Palette, s: &mut Settings, secrets: &mut Secrets, key: KeyField<'_>) {
+fn security_tab(ui: &mut Ui, p: &Palette, secrets: &mut Secrets, key: KeyField<'_>) {
     section(ui, p, icon::KEY, tr!("Identifiants des sites", "Site logins"), |ui| {
         note(
             ui,
@@ -448,7 +448,7 @@ fn security_tab(ui: &mut Ui, p: &Palette, s: &mut Settings, secrets: &mut Secret
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             let field = ui.add(
-                TextEdit::singleline(&mut s.virustotal_key)
+                TextEdit::singleline(&mut secrets.virustotal_key)
                     .password(!*key.shown)
                     .hint_text(RichText::new(tr!("Clé API VirusTotal (64 caractères)", "VirusTotal API key (64 characters)")).color(p.faint))
                     .desired_width(ui.available_width() - 90.0)
@@ -464,7 +464,9 @@ fn security_tab(ui: &mut Ui, p: &Palette, s: &mut Settings, secrets: &mut Secret
                 *key.shown = !*key.shown;
             }
         });
-        s.virustotal_key = s.virustotal_key.trim().to_owned();
+        if secrets.virustotal_key.trim() != secrets.virustotal_key {
+            secrets.virustotal_key = secrets.virustotal_key.trim().to_owned();
+        }
         ui.horizontal(|ui| {
             if ui.link(RichText::new(format!("{}  {}", icon::KEY, tr!("Obtenir une clé gratuite", "Get a free key"))).font(theme::semibold(13.0))).clicked() {
                 open_link(virustotal::KEY_PAGE.to_owned());

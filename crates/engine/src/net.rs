@@ -178,21 +178,42 @@ pub fn is_local(url: &Url) -> bool {
 }
 
 fn local_v4(ip: Ipv4Addr) -> bool {
-    let [a, b, ..] = ip.octets();
+    let [a, b, c, _] = ip.octets();
     ip.is_loopback()
         || ip.is_private()
         || ip.is_link_local()
         || a == 0 // 0.0.0.0/8 "this network": 0.0.0.0 reaches this computer on Linux
-        || ip.is_broadcast()
+        || a >= 224 // multicast (224.0.0.0/4), reserved (240.0.0.0/4) and the broadcast address
         || (a == 100 && (64..128).contains(&b)) // 100.64.0.0/10 carrier-grade NAT
+        || (a == 198 && (b & 0xfe) == 18) // 198.18.0.0/15 benchmarking, used inside some routers
+        || (a, b, c) == (192, 0, 0) // 192.0.0.0/24 protocol assignments (DS-Lite, NAT64 discovery)
 }
 
 fn local_v6(ip: Ipv6Addr) -> bool {
-    if let Some(v4) = ip.to_ipv4_mapped() {
+    if let Some(v4) = ip.to_ipv4_mapped().or_else(|| embedded_v4(ip)) {
         return local_v4(v4);
     }
     let first = ip.segments()[0];
-    ip.is_loopback() || ip.is_unspecified() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || (first & 0xfe00) == 0xfc00 // unique local
+        || (first & 0xffc0) == 0xfe80 // link-local
+        || (first & 0xffc0) == 0xfec0 // site-local (deprecated, still routed by some systems)
+}
+
+/// The IPv4 address an IPv6 one carries, where the network translates it to IPv4: NAT64
+/// (`64:ff9b::/96`, `64:ff9b:1::/48`), 6to4 (`2002::/16`) and the old IPv4-compatible `::a.b.c.d`.
+/// `64:ff9b::192.168.1.1` is the router on a NAT64 network: judged as 192.168.1.1.
+fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = ip.segments();
+    let low = || Ipv4Addr::from((u32::from(s[6]) << 16) | u32::from(s[7]));
+    match s {
+        [0x64, 0xff9b, 0, 0, 0, 0, ..] | [0x64, 0xff9b, 1, ..] => Some(low()),
+        [0x2002, hi, lo, ..] => Some(Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo))),
+        [0, 0, 0, 0, 0, 0, ..] if !ip.is_loopback() && !ip.is_unspecified() => Some(low()),
+        _ => None,
+    }
 }
 
 /// A hop from `from` to `to` is allowed unless it moves from the Internet into the local network.
@@ -255,6 +276,27 @@ mod tests {
             assert!(is_local(&u(local)), "{local}");
         }
         for public in ["https://example.com/", "http://8.8.8.8/", "http://[2001:4860::8888]/", "http://172.32.0.1/"] {
+            assert!(!is_local(&u(public)), "{public}");
+        }
+    }
+
+    /// IPv6 addresses a network translates to IPv4 are judged by the IPv4 address they carry.
+    #[test]
+    fn ipv4_inside_ipv6_is_judged_as_ipv4() {
+        for local in [
+            "http://[64:ff9b::192.168.1.1]/", // NAT64: the router
+            "http://[64:ff9b:1::a00:1]/",     // local-use NAT64 prefix: 10.0.0.1
+            "http://[2002:c0a8:101::1]/",     // 6to4 of 192.168.1.1
+            "http://[::127.0.0.1]/",          // IPv4-compatible
+            "http://[fec0::1]/",              // site-local
+            "http://[ff02::1]/",              // multicast
+            "http://239.255.255.250/",        // multicast (SSDP)
+            "http://198.18.0.1/",             // benchmarking
+            "http://192.0.0.8/",
+        ] {
+            assert!(is_local(&u(local)), "{local}");
+        }
+        for public in ["http://[64:ff9b::8.8.8.8]/", "http://[2002:808:808::1]/", "http://198.20.0.1/", "http://192.0.2.1/"] {
             assert!(!is_local(&u(public)), "{public}");
         }
     }

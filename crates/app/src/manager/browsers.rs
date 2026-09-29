@@ -21,6 +21,8 @@ const FIREFOX_SNOOZE: Duration = Duration::from_secs(30 * 60);
 
 const FIREFOX_FILE: &str = "firefox.json";
 const MAX_PAIRED: usize = 8;
+/// Browsers the extension may report from (see `Manager::browser_seen`).
+const MAX_BROWSERS: usize = 32;
 
 impl FirefoxPairing {
     /// `firefox.json`: a list of origins (RDM 0.2 wrote a single one).
@@ -110,6 +112,15 @@ impl Manager {
 
     /// The extension reported which browser it runs in (`x-rdm-browser`).
     pub fn browser_seen(&self, key: &str) {
+        // A computer has a handful of browsers: past this, a caller making names up is ignored
+        // (each browser met is kept for the whole session).
+        let room = {
+            let seen = lock(&self.browsers);
+            seen.contains_key(key) || seen.len() < MAX_BROWSERS
+        };
+        if !room {
+            return;
+        }
         let Some(browser) = Browser::from_key(key) else { return };
         if self.uninstall_requested(key) {
             return; // on its way out: not "installed" again
