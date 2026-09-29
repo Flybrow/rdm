@@ -431,10 +431,17 @@ pub struct Manager {
     /// Browsers the extension has talked from (key → Unix time): the extension window shows which
     /// ones are connected.
     browsers: Mutex<BTreeMap<String, u64>>,
+    /// Browsers whose extension the user asked to remove (Unix time of the request): it uninstalls
+    /// itself at its next check-in. Kept a day: past that, an extension heard from again is taken
+    /// as reinstalled by hand.
+    uninstalls: Mutex<BTreeMap<String, u64>>,
     installs: Mutex<HashMap<Browser, Install>>,
 }
 
 const BROWSERS_FILE: &str = "browsers.json";
+/// Extensions to remove (see `Manager::remove_extension`).
+const UNINSTALLS_FILE: &str = "uninstalls.json";
+const UNINSTALL_TTL_SECS: u64 = 24 * 3600;
 /// Messages kept for the window while it is closed.
 const MAX_NOTICES: usize = 20;
 
@@ -557,6 +564,12 @@ impl Manager {
             update: Mutex::default(),
             browsers: Mutex::new(
                 fs::read(crate::settings::config_file(BROWSERS_FILE))
+                    .ok()
+                    .and_then(|b| serde_json::from_slice(&b).ok())
+                    .unwrap_or_default(),
+            ),
+            uninstalls: Mutex::new(
+                fs::read(crate::settings::config_file(UNINSTALLS_FILE))
                     .ok()
                     .and_then(|b| serde_json::from_slice(&b).ok())
                     .unwrap_or_default(),
@@ -693,6 +706,9 @@ impl Manager {
     /// The extension reported which browser it runs in (`x-rdm-browser`).
     pub fn browser_seen(&self, key: &str) {
         let Some(browser) = Browser::from_key(key) else { return };
+        if self.uninstall_requested(key) {
+            return; // on its way out: not "installed" again
+        }
         let now = unix_now();
         let mut seen = lock(&self.browsers);
         let before = seen.insert(browser.key().to_owned(), now);
@@ -710,12 +726,56 @@ impl Manager {
         lock(&self.browsers).get(browser.key()).copied()
     }
 
+    /// "Remove the extension": RDM forgets it in `browser` at once, and the extension, if still
+    /// there, uninstalls itself at its next check-in (at the browser's start, then every few minutes).
+    pub fn remove_extension(&self, browser: Browser) {
+        let key = browser.key().to_owned();
+        let seen = {
+            let mut seen = lock(&self.browsers);
+            seen.remove(&key);
+            seen.clone()
+        };
+        save_json(BROWSERS_FILE, &seen);
+        let pending = {
+            let mut pending = lock(&self.uninstalls);
+            pending.insert(key, unix_now());
+            pending.clone()
+        };
+        save_json(UNINSTALLS_FILE, &pending);
+        lock(&self.installs).remove(&browser);
+        self.repaint();
+    }
+
+    /// Whether the extension in the browser named `key` must uninstall itself.
+    pub fn uninstall_requested(&self, key: &str) -> bool {
+        lock(&self.uninstalls).get(key).is_some_and(|&t| unix_now().saturating_sub(t) < UNINSTALL_TTL_SECS)
+    }
+
+    /// The request is over: the extension is uninstalling itself, or the user installs it again.
+    fn forget_uninstall(&self, key: &str) {
+        let pending = {
+            let mut pending = lock(&self.uninstalls);
+            if pending.remove(key).is_none() {
+                return;
+            }
+            pending.clone()
+        };
+        save_json(UNINSTALLS_FILE, &pending);
+    }
+
+    /// The extension of the browser named `key` got the request and uninstalls itself now.
+    pub fn extension_uninstalled(&self, key: &str) {
+        self.forget_uninstall(key);
+        self.repaint();
+    }
+
     pub fn install_state(&self, browser: Browser) -> Option<Install> {
         lock(&self.installs).get(&browser).cloned()
     }
 
     /// Prepares the extension for `browser` and opens the browser where the user confirms it.
     pub fn install_extension(self: &Arc<Self>, browser: Browser) {
+        self.forget_uninstall(browser.key());
         if matches!(lock(&self.installs).insert(browser, Install::Working), Some(Install::Working)) {
             return; // already on it
         }

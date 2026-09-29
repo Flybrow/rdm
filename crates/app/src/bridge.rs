@@ -50,6 +50,7 @@ pub async fn serve(manager: Arc<Manager>, listener: TcpListener) {
         // POST: Firefox sends `Origin` on POST only, so this is how its extension pairs.
         .route("/ping", get(ping_read).post(ping))
         .route("/config", get(config))
+        .route("/uninstalled", post(uninstalled))
         .route("/add", post(add))
         .route("/probe", post(probe))
         .route("/check", post(check))
@@ -143,11 +144,33 @@ async fn ping_read(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> R
 struct Config {
     /// Extensions the browser should hand over (space-separated), from the user's settings.
     captured: String,
+    /// The user removed the extension from RDM's window: it uninstalls itself.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    uninstall: bool,
 }
 
 async fn config(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> Result<Json<Config>, StatusCode> {
     guard_access(&manager, &headers, Access::Read)?;
-    Ok(Json(Config { captured: manager.settings().captured }))
+    let uninstall = browser_of(&headers).is_some_and(|b| manager.uninstall_requested(b));
+    Ok(Json(Config { captured: manager.settings().captured, uninstall }))
+}
+
+/// The extension got the removal request and uninstalls itself now.
+async fn uninstalled(State(manager): State<Arc<Manager>>, headers: HeaderMap) -> StatusCode {
+    if let Err(status) = guard(&manager, &headers) {
+        return status;
+    }
+    match browser_of(&headers) {
+        Some(browser) => {
+            manager.extension_uninstalled(browser);
+            StatusCode::NO_CONTENT
+        }
+        None => StatusCode::BAD_REQUEST,
+    }
+}
+
+fn browser_of(headers: &HeaderMap) -> Option<&str> {
+    headers.get(BROWSER).and_then(|v| v.to_str().ok())
 }
 
 async fn add(State(manager): State<Arc<Manager>>, headers: HeaderMap, Json(req): Json<AddRequest>) -> StatusCode {

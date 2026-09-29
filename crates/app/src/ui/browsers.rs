@@ -138,6 +138,19 @@ impl App<'_> {
                                 self.manager.install_extension(browser);
                                 *open = Some(browser);
                             }
+                            if seen.is_some()
+                                && ghost_button(ui, icon::TRASH, tr!("Supprimer l'extension", "Remove the extension"))
+                                    .on_hover_text(tr!(
+                                        "La désinstalle de ce navigateur à son prochain échange avec RDM (déjà supprimée : RDM l'oublie).",
+                                        "Uninstalls it from this browser at its next exchange with RDM (already removed: RDM forgets it)."
+                                    ))
+                                    .clicked()
+                            {
+                                self.manager.remove_extension(browser);
+                                if *open == Some(browser) {
+                                    *open = None;
+                                }
+                            }
                             if install.is_some() && *open != Some(browser) && ghost_button(ui, icon::LIST_BULLETS, tr!("Étapes", "Steps")).clicked() {
                                 *open = Some(browser);
                             }

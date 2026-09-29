@@ -216,6 +216,12 @@ async function appConfig() {
   const res = await call("/config");
   if (answered(res) && res.ok) {
     const config = await res.json().catch(() => null);
+    if (config?.uninstall === true) {
+      // Removed from RDM's window: say so (RDM stops asking), then go.
+      await call("/uninstalled", { method: "POST" });
+      await ext.management.uninstallSelf().catch(() => {});
+      return null;
+    }
     if (typeof config?.captured === "string") {
       await ext.storage.session.set({ [CONFIG]: config }).catch(() => {});
       return config;
