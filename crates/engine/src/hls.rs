@@ -25,8 +25,11 @@ const RETRIES: u32 = 8;
 const MAX_PLAYLIST_BYTES: u64 = 16 << 20;
 /// A single segment larger than this is not a segment: refuse instead of exhausting memory.
 const MAX_PART_BYTES: u64 = 256 << 20;
-/// Segments held in memory while waiting to be written in order.
-const MAX_IN_FLIGHT: usize = 16;
+/// Segments held in memory while waiting to be written in order. 8 keep a fast line busy: on a
+/// 600 MB 1080p stream, as fast as 16, with a third less memory.
+const MAX_IN_FLIGHT: usize = 8;
+/// Memory set aside for a segment before it arrives, at most (see `get_once`).
+const RESERVE_MAX: u64 = 16 << 20;
 /// Resume state written this often while downloading (data synced first).
 const CHECKPOINT: Duration = Duration::from_secs(20);
 
@@ -271,14 +274,18 @@ fn parse(base: &Url, text: &str) -> Result<Playlist, EngineError> {
 
 fn parse_master(base: &Url, text: &str) -> Vec<Variant> {
     let lines: Vec<&str> = text.lines().map(str::trim).collect();
-    // GROUP-ID → audio rendition URI, the DEFAULT one winning.
-    let mut audio: HashMap<&str, (bool, Url)> = HashMap::new();
+    // GROUP-ID → the audio rendition a player takes: the DEFAULT one, else the first. One without
+    // a URI is the sound inside the variant's own segments: no separate track then.
+    let mut audio: HashMap<&str, (bool, Option<Url>)> = HashMap::new();
     for attrs in lines.iter().filter_map(|l| l.strip_prefix("#EXT-X-MEDIA:")) {
         if attr(attrs, "TYPE") != Some("AUDIO") {
             continue;
         }
-        let (Some(group), Some(Ok(url))) = (attr(attrs, "GROUP-ID"), attr(attrs, "URI").map(|u| base.join(u))) else {
-            continue;
+        let Some(group) = attr(attrs, "GROUP-ID") else { continue };
+        let url = match attr(attrs, "URI").map(|u| base.join(u)) {
+            Some(Ok(url)) => Some(url),
+            Some(Err(_)) => continue,
+            None => None,
         };
         let default = attr(attrs, "DEFAULT") == Some("YES");
         if audio.get(group).is_none_or(|(was_default, _)| default && !was_default) {
@@ -296,7 +303,7 @@ fn parse_master(base: &Url, text: &str) -> Vec<Variant> {
         {
             variants.push(Variant {
                 url,
-                audio: attr(attrs, "AUDIO").and_then(|g| audio.get(g)).map(|(_, u)| u.clone()),
+                audio: attr(attrs, "AUDIO").and_then(|g| audio.get(g)).and_then(|(_, u)| u.clone()),
                 bandwidth: attr(attrs, "BANDWIDTH").and_then(|b| b.parse().ok()).unwrap_or(0),
                 height: attr(attrs, "RESOLUTION").and_then(|r| r.split_once(['x', 'X'])?.1.parse().ok()),
             });
@@ -440,7 +447,11 @@ async fn get_once(http: &Http<'_>, url: &Url, range: Option<(u64, u64)>, max: u6
         return Err(EngineError::Playlist("too large"));
     }
 
-    let mut body = Vec::new();
+    // Room for the announced size at once: grown by doubling, a segment would take up to twice
+    // its size, and several are held at once (see `MAX_IN_FLIGHT`). Only up to a usual segment's
+    // size: the announced length is the server's word, not data received.
+    let announced = res.content_length().unwrap_or(0).min(want).min(RESERVE_MAX);
+    let mut body = Vec::with_capacity(usize::try_from(announced).unwrap_or(0));
     let mut stream = res.bytes_stream();
     while let Some(chunk) = stream.next().await {
         body.extend_from_slice(&chunk?);
@@ -526,6 +537,19 @@ mod tests {
         );
         assert_eq!(v[0].audio.as_ref().unwrap().as_str(), "https://cdn.io/v/fr.m3u8");
         assert!(v[1].audio.is_none());
+    }
+
+    /// Regression (Apple's `bipbop_16x9`): the DEFAULT audio rendition has no URI — its sound is in
+    /// the variant — and an alternate one has; RDM took the alternate and refused the stream.
+    #[test]
+    fn a_default_rendition_without_uri_is_the_variants_own_sound() {
+        let v = master(
+            "#EXTM3U\n\
+             #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"Main\",AUTOSELECT=YES,DEFAULT=YES\n\
+             #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"Alt\",DEFAULT=NO,URI=\"alt/prog.m3u8\"\n\
+             #EXT-X-STREAM-INF:BANDWIDTH=900,CODECS=\"mp4a.40.2,avc1.4d400d\",AUDIO=\"a\"\ngear1/prog.m3u8\n",
+        );
+        assert!(v[0].audio.is_none(), "{:?}", v[0].audio);
     }
 
     #[test]

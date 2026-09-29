@@ -31,6 +31,7 @@ const RUNTIME_GRACE: Duration = Duration::from_millis(500);
 const QUIT_FLAG: &str = "--quit";
 
 fn main() -> eframe::Result {
+    prefer_x11_under_wslg();
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Started by a browser as the extension's connector: relays, and nothing else (see `native`).
     if native::is_host(&args) {
@@ -131,6 +132,18 @@ async fn single_instance(url: Option<&Url>) -> Option<tokio::net::TcpListener> {
         port = port
     ));
     None
+}
+
+/// Linux inside Windows (WSLg): its Wayland server drops the window as soon as it draws its title
+/// bar, and RDM would end at start; its X11 server works. Without `WAYLAND_DISPLAY`, the window
+/// goes through X11. Elsewhere nothing changes.
+fn prefer_x11_under_wslg() {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) && std::path::Path::new("/mnt/wslg").is_dir() {
+        // SAFETY: first thing in `main`, before any other thread exists (nothing reads the
+        // environment concurrently).
+        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+    }
 }
 
 /// Closing the session (SIGTERM), Ctrl+C in a terminal or a closed terminal: quit as if from the
