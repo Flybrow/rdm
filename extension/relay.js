@@ -6,7 +6,11 @@ const token = location.hash.slice(1);
 let queue = Promise.resolve();
 let failed = false;
 
-const tell = (type, extra = {}) => parent.postMessage({ source: "rdm-relay", token, type, ...extra }, "*");
+// Only to the YouTube page embedding this frame: a message aimed at an origin the parent does not
+// have is dropped by the browser, so the token never reaches anyone else.
+const tell = (type, extra = {}) => {
+  for (const origin of PAGES) parent.postMessage({ source: "rdm-relay", token, type, ...extra }, origin);
+};
 
 async function call(path, body, json = false) {
   const res = await fetch(`${BRIDGE}/record/${token}/${path}`, {

@@ -67,7 +67,15 @@
     }
     const body = {
       context: {
-        client: { clientName: c.name, clientVersion: version, hl: cfg("HL") ?? "fr", gl: cfg("GL") ?? "FR", visitorData: visitor, ...c.client },
+        client: {
+          clientName: c.name,
+          clientVersion: version,
+          // The page's own language and region; else the browser's (never a fixed one).
+          hl: cfg("HL") ?? navigator.language?.split("-")[0] ?? "en",
+          gl: cfg("GL") ?? navigator.language?.split("-")[1]?.toUpperCase() ?? "US",
+          visitorData: visitor,
+          ...c.client,
+        },
       },
       videoId,
       contentCheckOk: true,

@@ -49,10 +49,26 @@ pub(super) fn mark_from_internet(path: &Path) {
     }
 }
 
+/// What a download of the list writes, for choosing new names without holding the list's lock
+/// while the disk is looked at (a slow or sleeping disk must not freeze the window).
+pub(super) struct Planned {
+    id: DownloadId,
+    target: PathBuf,
+    completed: bool,
+}
+
+/// The files the list writes (or wrote).
+pub(super) fn planned(entries: &[Entry]) -> Vec<Planned> {
+    entries
+        .iter()
+        .map(|e| Planned { id: e.download.id, target: e.download.target.clone(), completed: *e.download.status() == Status::Completed })
+        .collect()
+}
+
 /// Where a new download of `name` goes, following the settings when a file of that name exists
 /// (`None`: skip it). Overwriting never follows a symbolic link (it could point anywhere), nor
 /// takes a name another download of the list will write.
-pub(super) fn target_for(settings: &Settings, name: &str, taken: &[Entry], except: Option<DownloadId>) -> Option<PathBuf> {
+pub(super) fn target_for(settings: &Settings, name: &str, taken: &[Planned], except: Option<DownloadId>) -> Option<PathBuf> {
     let dir = settings.target_dir(name);
     let path = dir.join(name);
     match settings.existing {
@@ -64,9 +80,7 @@ pub(super) fn target_for(settings: &Settings, name: &str, taken: &[Entry], excep
             let link = fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
             // Another download of the list still writing (or to write) that file keeps it: two
             // transfers into one file would corrupt both. A completed one gives it up.
-            let planned = taken.iter().any(|e| {
-                e.download.target == path && Some(e.download.id) != except && *e.download.status() != Status::Completed
-            });
+            let planned = taken.iter().any(|e| e.target == path && Some(e.id) != except && !e.completed);
             if link || planned || path.is_dir() {
                 return Some(unique_path(&dir, name, taken, except));
             }
@@ -81,7 +95,7 @@ pub(super) fn target_for(settings: &Settings, name: &str, taken: &[Entry], excep
 
 /// A free path for `name` in `dir`: neither on disk (with or without leftovers of an unfinished
 /// download) nor planned by another entry of the list (`except`: the entry being renamed).
-pub(super) fn unique_path(dir: &Path, name: &str, taken: &[Entry], except: Option<DownloadId>) -> PathBuf {
+pub(super) fn unique_path(dir: &Path, name: &str, taken: &[Planned], except: Option<DownloadId>) -> PathBuf {
     let (stem, ext) = name.rsplit_once('.').map_or((name, None), |(s, e)| (s, Some(e)));
     (0u32..)
         .map(|i| match (i, ext) {
@@ -92,7 +106,7 @@ pub(super) fn unique_path(dir: &Path, name: &str, taken: &[Entry], except: Optio
         .find(|p| {
             !p.exists()
                 && !with_suffix(p, engine::STATE_SUFFIX).exists()
-                && !taken.iter().any(|e| &e.download.target == p && Some(e.download.id) != except)
+                && !taken.iter().any(|e| &e.target == p && Some(e.id) != except)
         })
         .expect("unbounded range always yields a free name")
 }
@@ -112,7 +126,7 @@ mod tests {
     #[test]
     fn only_recording_chunks_count_as_leftovers() {
         let target = PathBuf::from("dl").join("Clip.mp4");
-        let recording = Recording { id: DownloadId::new(), target, parts: HashMap::new(), last_data: Instant::now() };
+        let recording = Recording { id: DownloadId::new(), target, parts: HashMap::new(), last_data: Instant::now(), files: HashMap::new() };
         let part = recording.part(3, Track::Audio);
         assert!(is_recording_part("Clip.mp4", &part.file_name().unwrap().to_string_lossy()));
         assert!(is_recording_part("Clip.mp4", "Clip.mp4.rec12.video"));

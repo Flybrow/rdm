@@ -3,9 +3,15 @@
 //! whose links YouTube refuses to hand to the extension's clients.
 //!
 //! Installed on request only, in the user's own data folder (no administrator rights), from the
-//! projects' GitHub releases: each file checked against the SHA-256 GitHub publishes for it
-//! (bgutil's sources: against the digest pinned below). yt-dlp only reads the link list
-//! (`-J`): RDM downloads the streams itself, like any other link.
+//! projects' GitHub releases, and nothing runs that was not checked first:
+//! - yt-dlp, its latest release (YouTube changes often): its checksum list must carry the
+//!   signature of yt-dlp's own key (written below), and the program must match it — a GitHub
+//!   account taken over cannot slip in another program;
+//! - Deno, bgutil and the drawing library bgutil needs (`canvas`, a native library): exact
+//!   versions, each archive checked against the SHA-256 written below. No package's own install
+//!   script runs (`canvas`'s used to download its library unchecked).
+//!
+//! yt-dlp only reads the link list (`-J`): RDM downloads the streams itself, like any other link.
 
 use std::{
     path::{Path, PathBuf},
@@ -20,6 +26,7 @@ use serde_json::Value;
 /// bgutil is pinned: its server code runs on this computer.
 const BGUTIL_TAG: &str = "2.0.0";
 const BGUTIL_PLUGIN: &str = "bgutil-ytdlp-pot-provider.zip";
+const BGUTIL_PLUGIN_SHA256: &str = "bce874dfa25896c2798e0f4f8147b7b22e785479eb1e459ab232bf2506c95016";
 const BGUTIL_SOURCE_SHA256: &str = "e95324ee24b1b0f1b4ad43d336343afe7cf1914acdf65d9cc1977f51d7b137c2";
 const BGUTIL_SOURCE_URL: &str = "https://codeload.github.com/Brainicism/bgutil-ytdlp-pot-provider/zip/refs/tags/2.0.0";
 
@@ -27,10 +34,37 @@ const BGUTIL_SOURCE_URL: &str = "https://codeload.github.com/Brainicism/bgutil-y
 const YTDLP_ASSET: &str = "yt-dlp.exe";
 #[cfg(not(windows))]
 const YTDLP_ASSET: &str = "yt-dlp_linux";
+/// yt-dlp's checksum list, and its detached signature.
+const YTDLP_SUMS: &str = "SHA2-256SUMS";
+
+/// yt-dlp's release signing key (RSA 4096, fingerprint AC0C BBE6 848D 6A87 3464 AF4E 57CF 6593
+/// 3B5A 7581): its repository's `public.key`, unchanged since 2023, the same on keys.openpgp.org.
+pub(crate) const SIGNING_KEY: crate::openpgp::RsaKey = crate::openpgp::RsaKey { n: &YTDLP_MODULUS, e: &[1, 0, 1] };
+const YTDLP_MODULUS: [u8; 512] = crate::openpgp::hex(concat!(
+    "f4ac5f738c63c0b74b6196de42d5e6f371c0155fb35bd6ff9ea908e4f961197531135428375803399e002b947766fdf66acd480efa9018ac1eb418a7a0edf7d4",
+    "0dff92d1714a11975e44b61e01aaaa2a14a26d56a50e3bce04ecedbb75bad3b1cb113400a80ef04cfb88b765aa9a92fad0d21ccabdbb2f1aa681d37798dbd9da",
+    "22cef9b3f49ca47f0be3e013d1f8cadcb00dad76cccc7a3e66429d538e3aee97644166754c71750f5f143a9df4b701298d8b0ce712628d6c698d185a26561edc",
+    "d5a19bb590ece39d2e458eaff204724b2260c7ee93711e6eecfcf9dababa66405b4316bba4b7eda58439e9294986aff23fdc81ea1ff5fef673e84b8ba2a90e47",
+    "a5b941f012bee167e96a2120ef92e7bee38f7d920f298c976bfd00ed0a2333080eac3f3ca334fe54290a92427e8a35d9ee01cd8e670169474a2bb7c320439823",
+    "adcbc9ce905a41904e28057df4945d61c308ef5a5cd84fdde8ea15680632d094b2b6e4709916b9663bab9011cbfd391db48cdcae0353d7aab67c66895d5643c9",
+    "d7b88f49809411be1e4f4e49f2e4bb71ab3726aaf58ef538c705baecd7804f10ef5f717c4a2ff08505bcd70d2bef02002b76aaa53289dc43fca271395f2faab3",
+    "27c10a162a96d7840c4dd027e92bae653a1d5c24e2227c284fb5a38ee14f28a76f7c7d463f86e7a9dcd39f32f10920c812d7f27cfb085fef4623b26493fcd98d",
+));
+
+/// Deno is pinned: it runs bgutil's code, and needs no update to follow YouTube.
+const DENO_VERSION: &str = "2.9.7";
 #[cfg(windows)]
-const DENO_ASSET: &str = "deno-x86_64-pc-windows-msvc.zip";
+const DENO_ASSET: (&str, &str) = ("deno-x86_64-pc-windows-msvc.zip", "a0c3101b4158d1dfb7d6a78a7bf0f3de80c96bb423c152beec8beb22786f2238");
 #[cfg(not(windows))]
-const DENO_ASSET: &str = "deno-x86_64-unknown-linux-gnu.zip";
+const DENO_ASSET: (&str, &str) = ("deno-x86_64-unknown-linux-gnu.zip", "c6527f24f4b16031d3ae4fa9f658d5f11534c8d84ce7dc8502420280919c3490");
+
+/// The native drawing library bgutil uses (through its `canvas` package), as its own release
+/// publishes it; unpacked over the package in place of its install script.
+const CANVAS_VERSION: &str = "3.2.3";
+#[cfg(windows)]
+const CANVAS_ASSET: (&str, &str) = ("canvas-v3.2.3-napi-v7-win32-x64.tar.gz", "ba953cc8c38303ab94cc83461c7561506a5a3af37d6c678de4a47914d2d0bb48");
+#[cfg(not(windows))]
+const CANVAS_ASSET: (&str, &str) = ("canvas-v3.2.3-napi-v7-linux-x64.tar.gz", "886d1cc270d4caad1d1698ee97532e79c60e992e16fe5f37f2d3bb058f4292b0");
 const EXE: &str = std::env::consts::EXE_SUFFIX;
 
 const MAX_FILE: u64 = 400 << 20;
@@ -96,7 +130,8 @@ pub fn install(rt: &tokio::runtime::Handle) {
         *current = Some(State::Installing);
     }
     rt.spawn(async {
-        let result = match tokio::time::timeout(SETUP_TIMEOUT, setup()).await {
+        let setup = async { setup(&tools_dir().ok_or("no user data folder")?).await };
+        let result = match tokio::time::timeout(SETUP_TIMEOUT, setup).await {
             Ok(result) => result,
             Err(_) => Err("installation took too long".to_owned()),
         };
@@ -119,26 +154,27 @@ struct Release {
 struct Asset {
     name: String,
     browser_download_url: String,
-    digest: Option<String>,
 }
 
-async fn setup() -> Result<(), String> {
-    let dir = tools_dir().ok_or("no user data folder")?;
-    let p = paths(&dir);
+/// Installs the module into `dir` (the user's data folder; a scratch folder in tests).
+async fn setup(dir: &Path) -> Result<(), String> {
+    let p = paths(dir);
     let io = |what: &str, e: std::io::Error| format!("{what}: {e}");
     let _ = tokio::fs::remove_file(dir.join(READY)).await;
     tokio::fs::create_dir_all(&p.plugins).await.map_err(|e| io("cannot create the folder", e))?;
     let client = engine::client().map_err(|e| e.to_string())?;
 
-    let ytdlp = release_asset(&client, "yt-dlp/yt-dlp", "latest", YTDLP_ASSET).await?;
+    let ytdlp = signed_ytdlp(&client).await?;
     let path = p.ytdlp.clone();
     tokio::task::spawn_blocking(move || write_exe(&path, |out| std::io::Write::write_all(out, &ytdlp))).await.map_err(|e| e.to_string())??;
 
-    let deno = release_asset(&client, "denoland/deno", "latest", DENO_ASSET).await?;
+    let (name, sha256) = DENO_ASSET;
+    let deno = download(&client, &format!("https://github.com/denoland/deno/releases/download/v{DENO_VERSION}/{name}"), Some(sha256)).await?;
     let path = p.deno.clone();
     tokio::task::spawn_blocking(move || unzip_exe(&deno, &format!("deno{EXE}"), &path)).await.map_err(|e| e.to_string())??;
 
-    let plugin = release_asset(&client, "Brainicism/bgutil-ytdlp-pot-provider", &format!("tags/{BGUTIL_TAG}"), BGUTIL_PLUGIN).await?;
+    let plugin_url = format!("https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/download/{BGUTIL_TAG}/{BGUTIL_PLUGIN}");
+    let plugin = download(&client, &plugin_url, Some(BGUTIL_PLUGIN_SHA256)).await?;
     tokio::fs::write(p.plugins.join(BGUTIL_PLUGIN), &plugin).await.map_err(|e| io("cannot write", e))?;
 
     let source = download(&client, BGUTIL_SOURCE_URL, Some(BGUTIL_SOURCE_SHA256)).await?;
@@ -147,20 +183,57 @@ async fn setup() -> Result<(), String> {
     let target = bgutil.clone();
     tokio::task::spawn_blocking(move || unzip_stripped(&source, &target)).await.map_err(|e| e.to_string())??;
 
-    // The token generator's own libraries (npm), as bgutil's documentation installs them.
+    // The token generator's own libraries (npm), each checked against bgutil's lock file
+    // (`--frozen`); no install script runs.
     let mut command = tokio::process::Command::new(&p.deno);
-    command.args(["install", "--allow-scripts=npm:canvas", "--frozen"]).current_dir(&p.server);
+    command.args(["install", "--frozen"]).current_dir(&p.server);
     let out = run(command, SETUP_TIMEOUT).await?;
     if !out.status.success() {
         return Err(format!("bgutil setup failed: {}", tail(&out.stderr)));
     }
-    tokio::fs::write(dir.join(READY), format!("bgutil {BGUTIL_TAG}\n")).await.map_err(|e| io("cannot write", e))
+    // What `canvas`'s install script would have downloaded: its library, from its own release.
+    let (name, sha256) = CANVAS_ASSET;
+    let canvas_url = format!("https://github.com/Automattic/node-canvas/releases/download/v{CANVAS_VERSION}/{name}");
+    let library = download(&client, &canvas_url, Some(sha256)).await?;
+    unpack_tar_gz(dir, &library, &p.server.join("node_modules").join("canvas")).await?;
+    let ready = format!("bgutil {BGUTIL_TAG}\ndeno {DENO_VERSION}\ncanvas {CANVAS_VERSION}\n");
+    tokio::fs::write(dir.join(READY), ready).await.map_err(|e| io("cannot write", e))
 }
 
-/// A release asset of `repo` (`latest` or `tags/<tag>`), checked against GitHub's SHA-256.
-async fn release_asset(client: &reqwest::Client, repo: &str, which: &str, name: &str) -> Result<Vec<u8>, String> {
+/// yt-dlp's latest program, once its release's checksum list carries yt-dlp's signature
+/// ([`SIGNING_KEY`]) and the program matches its line there.
+async fn signed_ytdlp(client: &reqwest::Client) -> Result<Vec<u8>, String> {
+    let release = latest_release(client, "yt-dlp/yt-dlp").await?;
+    let url_of = |name: &str| {
+        let asset = release.assets.iter().find(|a| a.name == name).ok_or_else(|| format!("{name} not found in yt-dlp's release"))?;
+        if asset.browser_download_url.starts_with("https://github.com/") {
+            Ok(asset.browser_download_url.clone())
+        } else {
+            Err(format!("{name}: unexpected address"))
+        }
+    };
+    let sums = download(client, &url_of(YTDLP_SUMS)?, None).await?;
+    let signature = download(client, &url_of(&format!("{YTDLP_SUMS}.sig"))?, None).await?;
+    if !crate::openpgp::verify(&SIGNING_KEY, &sums, &signature) {
+        return Err("yt-dlp: the checksum list is not signed by yt-dlp's key: refused".into());
+    }
+    let sha256 = sum_of(&String::from_utf8_lossy(&sums), YTDLP_ASSET).ok_or_else(|| format!("{YTDLP_ASSET}: not in yt-dlp's signed checksums"))?;
+    download(client, &url_of(YTDLP_ASSET)?, Some(&sha256)).await
+}
+
+/// The SHA-256 a `sha256sum` list (`<hex>  <name>` lines) gives for `name`.
+fn sum_of(list: &str, name: &str) -> Option<String> {
+    list.lines().find_map(|line| {
+        let (hash, file) = line.split_once(char::is_whitespace)?;
+        (file.trim_start().trim_start_matches('*') == name && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| hash.to_ascii_lowercase())
+    })
+}
+
+/// The latest release of `repo`, as GitHub's API lists it.
+async fn latest_release(client: &reqwest::Client, repo: &str) -> Result<Release, String> {
     let res = client
-        .get(format!("https://api.github.com/repos/{repo}/releases/{which}"))
+        .get(format!("https://api.github.com/repos/{repo}/releases/latest"))
         .header("accept", "application/vnd.github+json")
         .timeout(Duration::from_secs(30))
         .send()
@@ -168,13 +241,27 @@ async fn release_asset(client: &reqwest::Client, repo: &str, which: &str, name: 
         .and_then(reqwest::Response::error_for_status)
         .map_err(|e| format!("GitHub ({repo}): {e}"))?;
     let body = res.bytes().await.map_err(|e| format!("GitHub ({repo}): {e}"))?;
-    let release: Release = serde_json::from_slice(&body).map_err(|e| format!("GitHub ({repo}): {e}"))?;
-    let asset = release.assets.into_iter().find(|a| a.name == name).ok_or_else(|| format!("{name} not found in {repo}"))?;
-    let sha256 = asset.digest.as_deref().and_then(|d| d.strip_prefix("sha256:")).ok_or_else(|| format!("{name}: no checksum published"))?;
-    if !asset.browser_download_url.starts_with("https://github.com/") {
-        return Err(format!("{name}: unexpected address"));
+    serde_json::from_slice(&body).map_err(|e| format!("GitHub ({repo}): {e}"))
+}
+
+/// Unpacks a (checked) `.tar.gz` archive into `dest` with the system's `tar` (Windows 10 and
+/// later ship one), through a file in `work`.
+async fn unpack_tar_gz(work: &Path, archive: &[u8], dest: &Path) -> Result<(), String> {
+    let file = work.join("unpack.tar.gz");
+    tokio::fs::write(&file, archive).await.map_err(|e| format!("cannot write: {e}"))?;
+    #[cfg(windows)]
+    let tar = std::env::var_os("SystemRoot").map_or_else(|| "tar.exe".into(), |root| Path::new(&root).join(r"System32\tar.exe"));
+    #[cfg(not(windows))]
+    let tar = std::path::PathBuf::from("tar");
+    let mut command = tokio::process::Command::new(tar);
+    command.arg("-xzf").arg(&file).arg("-C").arg(dest);
+    let out = run(command, Duration::from_secs(120)).await;
+    let _ = tokio::fs::remove_file(&file).await;
+    match out {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => Err(format!("cannot unpack {}: {}", dest.display(), tail(&out.stderr))),
+        Err(e) => Err(e),
     }
-    download(client, &asset.browser_download_url, Some(sha256)).await
 }
 
 async fn download(client: &reqwest::Client, url: &str, sha256: Option<&str>) -> Result<Vec<u8>, String> {
@@ -284,6 +371,11 @@ pub fn valid_id(id: &str) -> bool {
 
 /// The links of video `id` (checked by [`valid_id`]), as yt-dlp resolves them.
 pub async fn extract(id: &str) -> Result<Formats, String> {
+    extract_in(&tools_dir().ok_or("no user data folder")?, id).await
+}
+
+/// [`extract`] with the module installed in `dir`.
+async fn extract_in(dir: &Path, id: &str) -> Result<Formats, String> {
     if !valid_id(id) {
         return Err("invalid video".into());
     }
@@ -294,8 +386,7 @@ pub async fn extract(id: &str) -> Result<Formats, String> {
         Ok(Ok(permit)) => permit,
         _ => return Err("the YouTube module is busy: try again in a moment".into()),
     };
-    let dir = tools_dir().ok_or("no user data folder")?;
-    let p = paths(&dir);
+    let p = paths(dir);
     let mut jsrt = p.deno.into_os_string();
     jsrt = [std::ffi::OsStr::new("deno:"), &jsrt].into_iter().collect();
     let mut server_home = p.server.into_os_string();
@@ -360,17 +451,49 @@ fn formats(info: &Value) -> Formats {
 
 // ── Processes ──────────────────────────────────────────────────────────────
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 async fn run(mut command: tokio::process::Command, limit: Duration) -> Result<std::process::Output, String> {
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
+    command.creation_flags(CREATE_NO_WINDOW);
+    // Its own process group: the programs it starts (Deno, bgutil) end with it (see `end_tree`).
+    #[cfg(unix)]
+    command.process_group(0);
     let child = command.spawn().map_err(|e| format!("cannot start the YouTube module: {e}"))?;
-    match tokio::time::timeout(limit, child.wait_with_output()).await {
-        Ok(result) => result.map_err(|e| e.to_string()),
-        Err(_) => Err("the YouTube module took too long".into()),
+    let pid = child.id();
+    let output = child.wait_with_output();
+    tokio::pin!(output);
+    tokio::select! {
+        result = &mut output => result.map_err(|e| e.to_string()),
+        () = tokio::time::sleep(limit) => {
+            // Ended while the child still is (then by `kill_on_drop`): ending only yt-dlp would
+            // leave its Deno running, hundreds of megabytes each.
+            if let Some(pid) = pid {
+                end_tree(pid).await;
+            }
+            Err("the YouTube module took too long".into())
+        }
+    }
+}
+
+/// Ends process `pid` and every process it started.
+async fn end_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        let taskkill = std::env::var_os("SystemRoot").map_or_else(|| "taskkill.exe".into(), |root| Path::new(&root).join(r"System32\taskkill.exe"));
+        let pid = pid.to_string();
+        let mut kill = tokio::process::Command::new(taskkill);
+        kill.args(["/T", "/F", "/PID", &pid]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(CREATE_NO_WINDOW);
+        let _ = kill.status().await;
+    }
+    #[cfg(unix)]
+    if let Ok(group) = i32::try_from(pid) {
+        // SAFETY: a plain signal to the process group the child leads (`process_group(0)`).
+        unsafe {
+            libc::killpg(group, libc::SIGKILL);
+        }
     }
 }
 
@@ -433,6 +556,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A module that takes too long is ended with what it started (yt-dlp's Deno): nothing is left
+    /// running behind it.
+    #[tokio::test]
+    async fn a_timeout_ends_the_whole_process_tree() {
+        let file = std::env::temp_dir().join(format!("rdm-tree-{}.pid", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        #[cfg(windows)]
+        let command = {
+            let mut c = tokio::process::Command::new("powershell");
+            let script = format!(
+                "$p = Start-Process -FilePath ping -ArgumentList '-n','120','127.0.0.1' -PassThru -WindowStyle Hidden; \
+                 Set-Content -Path '{}' -Value $p.Id; Start-Sleep 120",
+                file.display()
+            );
+            c.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+            c
+        };
+        #[cfg(unix)]
+        let command = {
+            let mut c = tokio::process::Command::new("sh");
+            c.args(["-c", &format!("sleep 120 & echo $! > '{}'; wait", file.display())]);
+            c
+        };
+        assert!(run(command, Duration::from_secs(6)).await.is_err(), "timed out");
+        let pid: u32 = std::fs::read_to_string(&file).expect("the child started").trim().parse().unwrap();
+        let _ = std::fs::remove_file(&file);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while alive(pid) {
+            assert!(std::time::Instant::now() < deadline, "the grandchild {pid} still runs");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    #[cfg(windows)]
+    fn alive(pid: u32) -> bool {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, STILL_ACTIVE},
+            System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+        };
+        // SAFETY: plain queries on a handle closed right after.
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() {
+                return false;
+            }
+            let mut code = 0u32;
+            let running = GetExitCodeProcess(process, &mut code) != 0 && code == STILL_ACTIVE as u32;
+            CloseHandle(process);
+            running
+        }
+    }
+
+    #[cfg(unix)]
+    fn alive(pid: u32) -> bool {
+        // A process killed but not reaped yet (a zombie) is gone for this purpose.
+        let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        !state.is_empty() && !state.rsplit(')').next().unwrap_or("").trim_start().starts_with('Z')
+    }
+
+    /// The program's line in yt-dlp's signed list (the real one of 2026.08.19).
+    #[test]
+    fn reads_the_signed_checksum_list() {
+        let list = include_str!("../testdata/yt-dlp-2026.08.19-SHA2-256SUMS");
+        assert_eq!(sum_of(list, "yt-dlp.exe").as_deref(), Some("66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a"));
+        assert_eq!(sum_of(list, "yt-dlp_linux").as_deref(), Some("58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a"));
+        assert_eq!(sum_of(list, "yt-dlp"), Some(sum_of(list, "yt-dlp").unwrap()), "exact names only");
+        assert!(sum_of(list, "yt-dlp_linux.zip").is_some_and(|s| Some(s) != sum_of(list, "yt-dlp_linux")));
+        assert_eq!(sum_of(list, "missing.exe"), None);
+        assert_eq!(sum_of("nothex  yt-dlp.exe\n", "yt-dlp.exe"), None);
+    }
+
     #[test]
     fn error_lines() {
         assert_eq!(tail(b"[youtube] x\nERROR: [youtube] x: Sign in to confirm you're not a bot\n"), "ERROR: [youtube] x: Sign in to confirm you're not a bot");
@@ -441,17 +635,26 @@ mod tests {
     }
 }
 
-/// The real thing: installs the module in the user's folder and reads a video's links (network,
-/// minutes): `cargo test -p rdm ytdlp::live -- --ignored --nocapture`.
+/// The real thing: installs the module (every check included) in a scratch folder and reads a
+/// video's links (network, minutes): `cargo test -p rdm ytdlp::live -- --ignored --nocapture`.
 #[cfg(test)]
 mod live {
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "network: downloads the YouTube module"]
     async fn install_and_extract() {
-        super::setup().await.expect("installation");
-        assert_eq!(super::state(), super::State::Ready);
-        let f = super::extract("jNQXAC9IVRw").await.expect("extraction");
+        let dir = std::env::temp_dir().join(format!("rdm-youtube-{}", std::process::id()));
+        super::setup(&dir).await.expect("installation");
+        assert!(dir.join(super::READY).is_file());
+        // bgutil's native drawing library loads (unpacked by RDM, not by its install script).
+        let p = super::paths(&dir);
+        let mut deno = tokio::process::Command::new(&p.deno);
+        let script = "import { createCanvas } from 'canvas'; createCanvas(4, 4).getContext('2d'); console.log('canvas ok')";
+        deno.args(["eval", script]).current_dir(&p.server);
+        let out = super::run(deno, std::time::Duration::from_secs(120)).await.expect("deno runs");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("canvas ok"), "{}", String::from_utf8_lossy(&out.stderr));
+        let f = super::extract_in(&dir, "jNQXAC9IVRw").await.expect("extraction");
         println!("{} — {} links, UA {}", f.title, f.formats.len(), f.ua);
         assert!(f.formats.iter().any(|x| x.audio && !x.video) && f.formats.iter().any(|x| x.video));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

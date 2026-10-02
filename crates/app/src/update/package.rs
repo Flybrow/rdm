@@ -26,9 +26,17 @@ const fn hex32(s: &str) -> [u8; 32] {
     out
 }
 
+/// A package downloaded and checked, and the SHA-256 its signature covers: the installation
+/// checks the file against it again, at the last moment (see `install`).
+#[derive(Debug, Clone)]
+pub struct Verified {
+    pub path: PathBuf,
+    pub sha256: String,
+}
+
 /// Downloads `package` of `version` and checks it (size, SHA-256, format, signature);
 /// `progress` gets the fraction done.
-pub async fn download(client: &reqwest::Client, version: &str, package: &Package, progress: impl Fn(f32)) -> Result<PathBuf, String> {
+pub async fn download(client: &reqwest::Client, version: &str, package: &Package, progress: impl Fn(f32)) -> Result<Verified, String> {
     if !trusted(&package.url) {
         return Err(tr!("adresse de téléchargement inattendue", "unexpected download address").into());
     }
@@ -51,7 +59,7 @@ pub async fn download(client: &reqwest::Client, version: &str, package: &Package
             let _ = tokio::fs::remove_file(crate::settings::with_suffix(&path, ".tmp")).await;
         }
         match result {
-            Ok(()) => return Ok(path),
+            Ok(sha256) => return Ok(Verified { path, sha256 }),
             Err(Fatal(reason)) => return Err(reason),
             Err(Retry(reason)) => last = reason,
         }
@@ -82,7 +90,8 @@ enum Failure {
 }
 use Failure::{Fatal, Retry};
 
-async fn fetch(client: &reqwest::Client, version: &str, package: &Package, path: &Path, signature: &[u8], progress: &impl Fn(f32)) -> Result<(), Failure> {
+/// The package at `path`, checked; its SHA-256.
+async fn fetch(client: &reqwest::Client, version: &str, package: &Package, path: &Path, signature: &[u8], progress: &impl Fn(f32)) -> Result<String, Failure> {
     use futures_util::StreamExt;
     use sha2::{Digest, Sha256};
     use tokio::io::AsyncWriteExt;
@@ -139,7 +148,8 @@ async fn fetch(client: &reqwest::Client, version: &str, package: &Package, path:
     if !signature_valid(signed_statement(version, &package.name, &digest).as_bytes(), signature) {
         return Err(Fatal(tr!("signature de la mise à jour invalide : installation refusée", "invalid update signature: installation refused").into()));
     }
-    tokio::fs::rename(&tmp, path).await.map_err(io)
+    tokio::fs::rename(&tmp, path).await.map_err(io)?;
+    Ok(digest)
 }
 
 /// The package's own format, from its first bytes.
@@ -226,7 +236,7 @@ mod tests {
             let package = package(&release.assets, method).unwrap_or_else(|| panic!("{method:?}: no signed package"));
             let file = download(&client, &version, &package, |_| {}).await.unwrap_or_else(|e| panic!("{method:?}: {e}"));
             println!("{method:?}: {} verified", package.name);
-            let _ = std::fs::remove_file(file);
+            let _ = std::fs::remove_file(file.path);
         }
         // Replayed as another version, the same packages are refused.
         let msi = package(&release.assets, Method::Msi).unwrap();

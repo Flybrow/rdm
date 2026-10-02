@@ -68,7 +68,7 @@ pub fn key_of(name: &str) -> String {
         .unwrap_or_default()
 }
 
-fn valid_key(key: &str) -> bool {
+pub(crate) fn valid_key(key: &str) -> bool {
     (1..=16).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_lowercase())
 }
 
@@ -280,14 +280,17 @@ fn firefox_manifest(chrome: &[u8]) -> Vec<u8> {
     serde_json::to_vec_pretty(&manifest).expect("serializable")
 }
 
-/// The version in the bundled manifest.
-pub fn version() -> String {
-    FILES
-        .iter()
-        .find(|(name, _)| *name == "manifest.json")
-        .and_then(|(_, bytes)| serde_json::from_slice::<serde_json::Value>(bytes).ok())
-        .and_then(|m| m.get("version")?.as_str().map(str::to_owned))
-        .unwrap_or_default()
+/// The version in the bundled manifest (read once: the extension window shows it at every frame).
+pub fn version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| {
+        FILES
+            .iter()
+            .find(|(name, _)| *name == "manifest.json")
+            .and_then(|(_, bytes)| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+            .and_then(|m| m.get("version")?.as_str().map(str::to_owned))
+            .unwrap_or_default()
+    })
 }
 
 /// Writes (or brings up to date) the unpacked extension; returns its folder. Files already

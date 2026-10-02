@@ -187,9 +187,9 @@ pub(crate) async fn run(
             }
             // A crash, a kill or a session closing mid-download loses at most this much.
             _ = checkpoint.tick(), if info.ranges => {
-                let _ = persist(&job.target, &state, info.version.as_deref(), &ctx.slots.segments()).await;
+                let _ = persist(&job.target, &state, info.version.as_deref(), &compact(ctx.slots.segments())).await;
             }
-            _ = show.tick(), if info.ranges => ctx.progress.set_pieces(ctx.slots.segments()),
+            _ = show.tick(), if info.ranges => ctx.progress.set_pieces(compact(ctx.slots.segments())),
             // More connections while they help: waiting pieces first, then parts of the piece
             // expected to finish last; dead connections replaced.
             _ = ramp.tick(), if info.ranges && failure.is_none() && !ctx.stop.is_cancelled() => {
@@ -218,7 +218,7 @@ pub(crate) async fn run(
     }
     // The data must be on disk before a state file claims it is: a power cut must not leave a
     // resume point ahead of the bytes actually stored.
-    let saved = if info.ranges { persist(&job.target, &state, info.version.as_deref(), &ctx.slots.segments()).await } else { Ok(()) };
+    let saved = if info.ranges { persist(&job.target, &state, info.version.as_deref(), &compact(ctx.slots.segments())).await } else { Ok(()) };
     match failure {
         Some(e) => Err(e), // the real cause wins over a secondary save error
         None => {
@@ -396,11 +396,14 @@ async fn fetch(ctx: &Ctx, slot: &Slot, followed: bool, answered: Option<Response
             res.error_for_status()?
         }
     };
-    // A 206 for another range (broken proxy/CDN) would silently corrupt the file. A 200 is the whole
+    // A 206 for another range (broken proxy/CDN), or from another version of the file (another
+    // size: a mirror serving a newer release), would silently corrupt the file. A 200 is the whole
     // file: right only when the whole file was asked for (RFC 9110 lets a server answer that way).
     let whole_file = pos == 0 && ctx.size.is_some_and(|size| asked.checked_add(1) == Some(size));
     let fits = match res.status() {
-        StatusCode::PARTIAL_CONTENT => range_start(res.headers()) == Some(pos),
+        StatusCode::PARTIAL_CONTENT => crate::content_range(res.headers()).is_some_and(|(start, total)| {
+            start == pos && total.is_none_or(|total| Some(total) == ctx.size)
+        }),
         // Its length too: a server answering with another version of the file (another size) would
         // not fit.
         StatusCode::OK => whole_file && res.content_length() == ctx.size,
@@ -611,9 +614,21 @@ fn sparse(file: &std::fs::File) {
     let _ = file;
 }
 
-fn range_start(headers: &HeaderMap) -> Option<u64> {
-    let v = headers.get(reqwest::header::CONTENT_RANGE)?.to_str().ok()?;
-    v.strip_prefix("bytes ")?.split(['-', '/']).next()?.trim().parse().ok()
+/// The pieces for the resume state and the progress bar, in file order, finished neighbours joined:
+/// a long download split many times keeps a short list (a smaller state file, less to draw).
+fn compact(mut segs: Vec<Segment>) -> Vec<Segment> {
+    segs.sort_unstable_by_key(|s| s.start);
+    let mut out: Vec<Segment> = Vec::with_capacity(segs.len());
+    for s in segs {
+        match out.last_mut() {
+            Some(last) if last.is_done() && s.is_done() && last.end.checked_add(1) == Some(s.start) => {
+                last.end = s.end;
+                last.pos = s.end.saturating_add(1);
+            }
+            _ => out.push(s),
+        }
+    }
+    out
 }
 
 /// What a resume state file holds: the file's version on the server when the download began, and
@@ -718,6 +733,17 @@ mod tests {
         assert!(covers_exactly(vec![Segment::new(0, u64::MAX)], 100).is_none());
     }
 
+    #[test]
+    fn finished_neighbours_are_joined() {
+        let done = |start, end| Segment { start, pos: end + 1, end };
+        let live = Segment { start: 20, pos: 25, end: 29 };
+        // Out of order (pieces split later come last), one overshooting its end.
+        let segs = vec![done(30, 39), Segment { pos: 22, ..done(10, 19) }, done(0, 9), live];
+        let joined = compact(segs);
+        assert_eq!(joined, [done(0, 19), live, done(30, 39)]);
+        assert!(covers_exactly(joined, 40).is_some(), "still tiles the file");
+    }
+
     #[tokio::test]
     async fn resumes_only_the_same_version_of_the_file() {
         let dir = std::env::temp_dir().join(format!("rdm-resume-{}", std::process::id()));
@@ -752,9 +778,12 @@ mod tests {
 
     #[test]
     fn parses_content_range() {
-        let mut h = HeaderMap::new();
-        h.insert(reqwest::header::CONTENT_RANGE, "bytes 1024-2047/4096".parse().unwrap());
-        assert_eq!(range_start(&h), Some(1024));
+        let range = |v: &str| crate::content_range(&HeaderMap::from_iter([(reqwest::header::CONTENT_RANGE, v.parse().unwrap())]));
+        assert_eq!(range("bytes 1024-2047/4096"), Some((1024, Some(4096))));
+        assert_eq!(range("bytes 0-0/*"), Some((0, None)), "size unknown");
+        assert_eq!(range("bytes */4096"), None, "no range at all");
+        assert_eq!(range("items 0-1/2"), None);
+        assert_eq!(crate::content_range(&HeaderMap::new()), None);
     }
 
     #[test]

@@ -40,16 +40,29 @@ export const isMediaUrl = (url) => MEDIA_EXTENSIONS.has(extOf(pathOf(url)));
 // MPEG-TS fragments and DASH manifests are pieces of a stream, not standalone media.
 export const isMediaType = (type = "") => /^(video|audio)\//i.test(type) && !/mp2t|mpegurl|dash/i.test(type);
 
+// Same lists as RDM's `engine/src/net.rs`: second levels a country's registry hands out
+// (`co.uk`, `ne.jp`), and hosting platforms whose subdomains belong to different people.
+const REGISTRY_SECOND_LEVELS = new Set(
+  "ac co com edu go gob gov gv ltd mil ne net nic nom or org plc sch".split(" "),
+);
+const SHARED_HOSTS = (
+  "appspot.com azurewebsites.net blogspot.com cloudfront.net firebaseapp.com fly.dev github.io gitlab.io " +
+  "glitch.me herokuapp.com netlify.app neocities.org onrender.com pages.dev s3.amazonaws.com tumblr.com " +
+  "vercel.app web.app wordpress.com workers.dev"
+).split(" ");
+
 /**
- * Registrable-domain approximation, as RDM's `net::same_site`: the last two labels, three under a
- * country's second level (`bbc.co.uk`, not `co.uk`: stricter when in doubt).
+ * Registrable-domain approximation, as RDM's `net::same_site`: the last two labels, one more under
+ * a country's registry (`bbc.co.uk`, not `co.uk`) or a shared hosting platform (`alice.github.io`).
  */
 export const siteOf = (url) => {
   try {
-    const labels = new URL(url).hostname.replace(/\.$/, "").split(".");
+    const host = new URL(url).hostname.replace(/\.$/, "");
+    const labels = host.split(".");
     const [second = "", tld = ""] = labels.slice(-2);
-    const keep = labels.length > 2 && tld.length === 2 && second.length <= 3 ? 3 : 2;
-    return labels.slice(-keep).join(".");
+    const shared = SHARED_HOSTS.find((s) => host.endsWith(`.${s}`));
+    const suffix = shared ? shared.split(".").length : tld.length === 2 && REGISTRY_SECOND_LEVELS.has(second) ? 2 : 1;
+    return labels.slice(-(suffix + 1)).join(".");
   } catch {
     return "";
   }

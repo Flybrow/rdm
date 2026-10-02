@@ -222,8 +222,9 @@ pub fn allowed_hop(from: &Url, to: &Url) -> bool {
 }
 
 /// Whether two URLs belong to the same site, as browsers scope cookies: the same host, or two
-/// hosts under the same registrable domain — approximated by its last two labels (three under a
-/// country's second level, `co.uk`: stricter when in doubt). An IP address: that address only.
+/// hosts under the same registrable domain — approximated by its last two labels, one more under
+/// a country's registry (`co.uk`) or a hosting platform shared by strangers (`github.io`). An IP
+/// address: that address only.
 pub fn same_site(a: &Url, b: &Url) -> bool {
     match (a.host(), b.host()) {
         (Some(Host::Domain(x)), Some(Host::Domain(y))) => site(x) == site(y),
@@ -233,22 +234,46 @@ pub fn same_site(a: &Url, b: &Url) -> bool {
     }
 }
 
+/// Second levels a country's registry hands out (`co.uk`, `com.au`, `ne.jp`, `gob.mx`): a site is
+/// one label further. Any other (`zdf.de`, `tf1.fr`) is a site of its own. Same list as
+/// `extension/shared.js`.
+const REGISTRY_SECOND_LEVELS: [&str; 18] =
+    ["ac", "co", "com", "edu", "go", "gob", "gov", "gv", "ltd", "mil", "ne", "net", "nic", "nom", "or", "org", "plc", "sch"];
+
+/// Hosting platforms whose subdomains belong to different people (the Public Suffix List's private
+/// section, most visited part): `alice.github.io` and `bob.github.io` are two sites. Same list as
+/// `extension/shared.js`.
+const SHARED_HOSTS: [&str; 20] = [
+    "appspot.com", "azurewebsites.net", "blogspot.com", "cloudfront.net", "firebaseapp.com", "fly.dev", "github.io",
+    "gitlab.io", "glitch.me", "herokuapp.com", "netlify.app", "neocities.org", "onrender.com", "pages.dev", "s3.amazonaws.com",
+    "tumblr.com", "vercel.app", "web.app", "wordpress.com", "workers.dev",
+];
+
 fn site(host: &str) -> String {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     let labels: Vec<&str> = host.split('.').collect();
-    let keep = match labels.as_slice() {
-        [.., second, tld] if tld.len() == 2 && second.len() <= 3 => 3,
-        _ => 2,
-    };
-    labels[labels.len().saturating_sub(keep)..].join(".")
+    // Labels of the suffix under which sites are registered.
+    let suffix = SHARED_HOSTS
+        .iter()
+        .find(|shared| host.strip_suffix(**shared).is_some_and(|rest| rest.ends_with('.')))
+        .map_or_else(
+            || match labels.as_slice() {
+                [.., second, tld] if tld.len() == 2 && REGISTRY_SECOND_LEVELS.contains(second) => 2,
+                _ => 1,
+            },
+            |shared| shared.split('.').count(),
+        );
+    labels[labels.len().saturating_sub(suffix + 1)..].join(".")
 }
 
 /// The request headers fit for `to` when they were given for `from`: the credentials (cookies, a
 /// login) stay within `from`'s site. A playlist may point anywhere: its segments on another site
-/// must not receive them — what browsers do, and what the HTTP client does on redirects.
+/// must not receive them — what browsers do, and what the HTTP client does on redirects. Given
+/// over HTTPS, they never travel in clear either: an `http://` segment of the same site gets none.
 pub fn headers_for<'h>(headers: &'h HeaderMap, from: &Url, to: &Url) -> Cow<'h, HeaderMap> {
     let credentials = [header::COOKIE, header::AUTHORIZATION, header::PROXY_AUTHORIZATION];
-    if same_site(from, to) || !credentials.iter().any(|h| headers.contains_key(h)) {
+    let downgrade = from.scheme() == "https" && to.scheme() != "https";
+    if (same_site(from, to) && !downgrade) || !credentials.iter().any(|h| headers.contains_key(h)) {
         return Cow::Borrowed(headers);
     }
     let mut stripped = headers.clone();
@@ -325,6 +350,17 @@ mod tests {
         assert!(same("http://10.0.0.2/a", "http://10.0.0.2:8080/b"));
         assert!(!same("http://10.0.0.2/", "http://10.0.0.3/"));
         assert!(!same("http://127.0.0.1/", "http://localhost/"));
+        // A short name under a country code is a site, not a registry: its CDN is the same site.
+        assert!(same("https://www.zdf.de/", "https://cdn.zdf.de/seg.ts"));
+        assert!(same("https://www.tf1.fr/", "https://videos.tf1.fr/"));
+        assert!(same("https://www.amazon.co.jp/", "https://images.amazon.co.jp/"));
+        assert!(!same("https://shop.com.au/", "https://other.com.au/"));
+        // Strangers on one hosting platform are not one site.
+        assert!(!same("https://alice.github.io/", "https://bob.github.io/"));
+        assert!(same("https://alice.github.io/a", "https://alice.github.io/b"));
+        assert!(!same("https://a.s3.amazonaws.com/", "https://b.s3.amazonaws.com/"));
+        assert!(!same("https://github.io/", "https://bob.github.io/"));
+        assert!(same("https://github.com/", "https://api.github.com/"), "only the platform's own suffix");
     }
 
     #[test]
@@ -338,6 +374,12 @@ mod tests {
         let foreign = headers_for(&h, &from, &u("https://tracker.example.net/seg.ts"));
         assert!(!foreign.contains_key(header::COOKIE) && !foreign.contains_key(header::AUTHORIZATION));
         assert!(foreign.contains_key(header::REFERER), "only credentials are dropped");
+        // Same site, but in clear: what was given over HTTPS stays off the wire.
+        let clear = headers_for(&h, &from, &u("http://cdn.example.com/seg.ts"));
+        assert!(!clear.contains_key(header::COOKIE) && !clear.contains_key(header::AUTHORIZATION));
+        // Given for a plain-HTTP site (a NAS saved as http://), its own segments still get them.
+        let lan = u("http://nas.example.com/a.m3u8");
+        assert!(matches!(headers_for(&h, &lan, &u("http://nas.example.com/seg.ts")), Cow::Borrowed(_)));
     }
 
     #[test]

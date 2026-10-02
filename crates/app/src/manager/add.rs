@@ -18,11 +18,30 @@ pub struct AddRequest {
     /// Shown to the user only because its file already exists (not a browser download to confirm).
     #[serde(skip)]
     pub existing_only: bool,
+    /// Waiting for the user's answer: a file of its name was already there when it was queued
+    /// (looked up once, not at every frame of the window).
+    #[serde(skip)]
+    exists: bool,
 }
 
 impl AddRequest {
     pub fn from_url(url: Url) -> Self {
-        Self { url, audio_url: None, filename: None, referrer: None, cookies: None, user_agent: None, existing: None, existing_only: false }
+        Self {
+            url,
+            audio_url: None,
+            filename: None,
+            referrer: None,
+            cookies: None,
+            user_agent: None,
+            existing: None,
+            existing_only: false,
+            exists: false,
+        }
+    }
+
+    /// The file name the page gave, made safe.
+    fn given_name(&self) -> Option<String> {
+        self.filename.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(engine::sanitize_file_name)
     }
 
     /// The request behind a download of the list, from its link and headers.
@@ -55,25 +74,21 @@ impl Manager {
     /// A download from the browser extension: added at once, or first shown in the (raised)
     /// window for the user's go-ahead, as the settings say.
     pub fn add_from_browser(self: &Arc<Self>, req: AddRequest) {
-        let (confirm, ask) = self.with_settings(|s| (s.confirm_browser, s.existing == ExistingFile::Ask));
-        let exists = req
-            .filename
-            .as_deref()
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
-            .map(engine::sanitize_file_name)
-            .is_some_and(|n| self.with_settings(|s| s.target_dir(&n)).join(&n).is_file());
+        // A copy: the disk is looked at below, never under the settings' lock.
+        let settings = self.settings();
+        let (confirm, ask) = (settings.confirm_browser, settings.existing == ExistingFile::Ask);
+        let exists = req.given_name().is_some_and(|n| settings.target_dir(&n).join(&n).is_file());
         // Without confirmation, still asked when the file is already there (`ExistingFile::Ask`).
         if confirm || (ask && exists) {
             // No room left to ask: a page flooding the extension, the user has enough to answer.
-            let _ = self.wait_for_answer(AddRequest { existing_only: !confirm, ..req });
+            let _ = self.wait_for_answer(AddRequest { existing_only: !confirm, exists, ..req });
         } else {
             self.add(req);
         }
     }
 
     /// Shown in the (raised) window until the user answers (see `to_confirm`). `Err`: no room left
-    /// to ask (`MAX_TO_CONFIRM`), the request comes back.
+    /// to ask (`MAX_TO_CONFIRM`), the request comes back. `req.exists` is filled in by the caller.
     fn wait_for_answer(&self, req: AddRequest) -> Result<(), Box<AddRequest>> {
         {
             let mut waiting = lock(&self.to_confirm);
@@ -90,14 +105,18 @@ impl Manager {
         Ok(())
     }
 
-    /// The first download waiting for the user's answer.
+    /// The first download waiting for the user's answer (read at every frame: no disk access).
     pub fn to_confirm(&self) -> Option<ToConfirm> {
         let waiting = lock(&self.to_confirm);
         let req = waiting.front()?;
-        let name = req.filename.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(engine::sanitize_file_name);
         let (confirming, ask) = self.with_settings(|s| (s.confirm_browser, s.existing == ExistingFile::Ask));
-        let exists = name.as_deref().is_some_and(|n| self.with_settings(|s| s.target_dir(n)).join(n).is_file());
-        Some(ToConfirm { url: req.url.clone(), name, ask_existing: ask && exists, confirming: confirming && !req.existing_only, waiting: waiting.len() })
+        Some(ToConfirm {
+            url: req.url.clone(),
+            name: req.given_name(),
+            ask_existing: ask && req.exists,
+            confirming: confirming && !req.existing_only,
+            waiting: waiting.len(),
+        })
     }
 
     /// The user answered for the first waiting download: `download` it or not, with `existing`
@@ -124,7 +143,7 @@ impl Manager {
     /// for the real one in the background (bounded), and the download starts right after.
     pub fn add(self: &Arc<Self>, req: AddRequest) {
         let headers = req.headers();
-        let given = req.filename.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(engine::sanitize_file_name);
+        let given = req.given_name();
         let provisional = given.clone().unwrap_or_else(|| engine::suggest_file_name(&req.url, None));
         let Some(id) = self.insert(req.url.clone(), req.audio_url, &provisional, headers.clone(), given.is_none(), req.existing) else {
             return; // the very same link, just sent twice
@@ -143,7 +162,7 @@ impl Manager {
 
     /// Name from the server; HLS gets the extension of what will actually be written.
     async fn suggest_name(&self, url: &Url, headers: &HeaderMap) -> Option<String> {
-        let client = self.client(url).await;
+        let client = self.client(url).await.ok()?;
         // The site's saved login too: without it a protected server only answers 401.
         let mut headers = headers.clone();
         self.add_login(url, &mut headers);
@@ -162,20 +181,25 @@ impl Manager {
     /// exists and the settings say to skip it, it goes away.
     fn resolved(self: &Arc<Self>, id: DownloadId, name: Option<String>) {
         let settings = self.settings();
-        let mut entries = lock(&self.entries);
-        let Some(i) = entries.iter().position(|e| e.download.id == id) else { return };
+        // The disk is looked at with only the naming lock held (see `naming`); the list is read,
+        // then written, in short steps around it.
+        let naming = lock(&self.naming);
+        let Some((current, status, taken)) =
+            self.view(|es| es.iter().find(|e| e.download.id == id).map(|e| (e.name.clone(), e.download.status().clone(), planned(es))))
+        else {
+            return;
+        };
         // Its name known at last (a pasted or copied link): a file of that name already there is
         // the user's to decide, before anything is written (`ExistingFile::Ask`).
-        let final_name = name.clone().unwrap_or_else(|| entries[i].name.clone());
-        if settings.existing == ExistingFile::Ask
-            && matches!(entries[i].download.status(), Status::Queued)
-            && settings.target_dir(&final_name).join(&final_name).is_file()
-        {
-            let e = entries.remove(i);
-            drop(entries);
+        let final_name = name.clone().unwrap_or_else(|| current.clone());
+        if settings.existing == ExistingFile::Ask && status == Status::Queued && settings.target_dir(&final_name).join(&final_name).is_file() {
+            let removed = self.take_entry(id, |s| *s == Status::Queued);
+            drop(naming); // `add` below chooses a name too
+            let Some(e) = removed else { return };
             let mut req = AddRequest::from_parts(e.download.url.clone(), e.download.audio.clone(), &e.headers);
             req.filename = Some(final_name);
             req.existing_only = true;
+            req.exists = true;
             // Too many questions already: not lost, downloaded under a new name.
             if let Err(req) = self.wait_for_answer(req) {
                 self.add(AddRequest { existing: Some(ExistingFile::Rename), existing_only: false, ..*req });
@@ -183,27 +207,44 @@ impl Manager {
             self.changed();
             return;
         }
-        if let Some(name) = name.filter(|n| *n != entries[i].name)
-            && matches!(entries[i].download.status(), Status::Queued | Status::Paused)
+        let renamable = |s: &Status| matches!(s, Status::Queued | Status::Paused);
+        let mut target = None;
+        if let Some(name) = name.filter(|n| *n != current)
+            && renamable(&status)
         {
-            match target_for(&settings, &name, &entries, Some(id)) {
-                Some(target) => {
-                    entries[i].replaces = target.is_file();
-                    entries[i].download.target = target;
-                    entries[i].named();
+            match target_for(&settings, &name, &taken, Some(id)) {
+                Some(path) => {
+                    let replaces = path.is_file();
+                    target = Some((path, replaces));
                 }
                 None => {
-                    entries.remove(i);
-                    drop(entries);
+                    self.take_entry(id, renamable);
+                    drop(naming);
                     self.notice(false, &trf!("Déjà téléchargé, ignoré : {name}", "Already downloaded, skipped: {name}", name = name));
                     self.changed();
                     return;
                 }
             }
         }
-        entries[i].resolving = false;
+        let mut entries = lock(&self.entries);
+        let Some(e) = entries.iter_mut().find(|e| e.download.id == id) else { return };
+        if let Some((path, replaces)) = target
+            && renamable(e.download.status())
+        {
+            e.replaces = replaces;
+            e.download.target = path;
+            e.named();
+        }
+        e.resolving = false;
         drop(entries);
         self.changed();
+    }
+
+    /// Removes download `id` from the list if its status still allows it.
+    fn take_entry(&self, id: DownloadId, allowed: impl Fn(&Status) -> bool) -> Option<Entry> {
+        let mut entries = lock(&self.entries);
+        let i = entries.iter().position(|e| e.download.id == id && allowed(e.download.status()))?;
+        Some(entries.remove(i))
     }
 
     /// `None` when the same link was added a moment ago (a double click, a page asking twice).
@@ -220,19 +261,24 @@ impl Manager {
         if let Some(existing) = existing {
             settings.existing = existing;
         }
-        let mut entries = lock(&self.entries);
-        let twice = entries.iter().rev().take_while(|e| e.added.is_some_and(|t| t.elapsed() < DUPLICATE_WINDOW)).any(|e| {
-            e.download.url == url && e.download.audio == audio && !matches!(e.download.status(), Status::Failed(_))
-        });
-        if twice {
-            return None;
-        }
+        // One name chosen at a time, the disk looked at outside the list's lock (see `naming`).
+        let naming = lock(&self.naming);
+        let taken = {
+            let entries = lock(&self.entries);
+            let twice = entries.iter().rev().take_while(|e| e.added.is_some_and(|t| t.elapsed() < DUPLICATE_WINDOW)).any(|e| {
+                e.download.url == url && e.download.audio == audio && !matches!(e.download.status(), Status::Failed(_))
+            });
+            if twice {
+                return None;
+            }
+            planned(&entries)
+        };
         // A name already known (the page gave it): an existing file may mean "skip".
         let target = if resolving {
-            unique_path(&settings.target_dir(name), name, &entries, None)
+            unique_path(&settings.target_dir(name), name, &taken, None)
         } else {
-            let Some(target) = target_for(&settings, name, &entries, None) else {
-                drop(entries);
+            let Some(target) = target_for(&settings, name, &taken, None) else {
+                drop(naming);
                 self.notice(false, &trf!("Déjà téléchargé, ignoré : {name}", "Already downloaded, skipped: {name}", name = name));
                 return None;
             };
@@ -247,8 +293,8 @@ impl Manager {
         entry.resolving = resolving;
         entry.replaces = replaces;
         entry.added = Some(Instant::now());
-        entries.push(entry);
-        drop(entries);
+        lock(&self.entries).push(entry);
+        drop(naming);
         self.changed();
         Some(id)
     }

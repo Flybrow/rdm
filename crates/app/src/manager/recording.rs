@@ -26,11 +26,20 @@ pub(super) struct Recording {
     pub(super) target: PathBuf,
     pub(super) parts: HashMap<(u32, Track), u64>,
     pub(super) last_data: Instant,
+    /// Each part's file, kept open while the recording runs: closing a growing file after every
+    /// chunk made Windows' antivirus scan all of it again each time.
+    pub(super) files: HashMap<(u32, Track), PartFile>,
 }
+
+/// A recording part's file, written chunk after chunk (one writer at a time).
+pub(super) type PartFile = Arc<tokio::sync::Mutex<tokio::fs::File>>;
 
 /// Media sources one recording may create (the programme, ads, quality restarts): far more than a
 /// player needs.
 const MAX_RECORDING_SOURCES: usize = 64;
+/// More than any real recording (12 hours of 4K): the page's scripts can see the recording's
+/// token, and must not be able to fill the disk through it.
+const MAX_RECORDING_BYTES: u64 = 64 << 30;
 
 impl Recording {
     pub(super) fn part(&self, ms: u32, track: Track) -> PathBuf {
@@ -52,16 +61,18 @@ impl Manager {
     pub fn start_recording(&self, page: Url, name: &str) -> String {
         let name = engine::sanitize_file_name(name);
         let settings = self.settings();
-        let mut entries = lock(&self.entries);
-        let target = unique_path(&settings.target_dir(&name), &name, &entries, None);
+        // The name chosen outside the list's lock (see `naming`).
+        let naming = lock(&self.naming);
+        let taken = self.view(planned);
+        let target = unique_path(&settings.target_dir(&name), &name, &taken, None);
         let download = Download::recording(page, target.clone());
         let id = download.id;
         let mut entry = Entry::new(download, Vec::new(), 0, 0);
         entry.added = Some(Instant::now());
-        entries.push(entry);
-        drop(entries);
+        lock(&self.entries).push(entry);
+        drop(naming);
         let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
-        let recording = Recording { id, target, parts: HashMap::new(), last_data: Instant::now() };
+        let recording = Recording { id, target, parts: HashMap::new(), last_data: Instant::now(), files: HashMap::new() };
         lock(&self.recordings).insert(token.clone(), recording);
         self.changed();
         token
@@ -69,7 +80,7 @@ impl Manager {
 
     /// Appends a chunk of one track; `false` if the token is unknown (finished, cancelled, forged).
     pub async fn record_append(&self, token: &str, ms: u32, track: Track, data: &[u8]) -> std::io::Result<bool> {
-        let (path, id) = {
+        let (path, id, open) = {
             let mut recordings = lock(&self.recordings);
             let Some(r) = recordings.get_mut(token) else { return Ok(false) };
             // A page creating media sources without end (a file each) is not a player: refused.
@@ -77,15 +88,34 @@ impl Manager {
             if new_source && r.parts.keys().map(|(m, _)| *m).collect::<HashSet<_>>().len() >= MAX_RECORDING_SOURCES {
                 return Ok(false);
             }
+            let total: u64 = r.parts.values().sum();
+            if total.saturating_add(data.len() as u64) > MAX_RECORDING_BYTES {
+                drop(recordings);
+                self.cancel_recording(token, tr!("enregistrement anormalement volumineux", "abnormally large recording"));
+                return Ok(false);
+            }
             r.last_data = Instant::now();
             *r.parts.entry((ms, track)).or_default() += data.len() as u64;
-            (r.part(ms, track), r.id)
+            (r.part(ms, track), r.id, r.files.get(&(ms, track)).cloned())
         };
-        if let Some(dir) = path.parent() {
-            tokio::fs::create_dir_all(dir).await?;
+        let file = match open {
+            Some(file) => file,
+            None => {
+                if let Some(dir) = path.parent() {
+                    tokio::fs::create_dir_all(dir).await?;
+                }
+                let file = tokio::fs::OpenOptions::new().create(true).append(true).open(&path).await?;
+                let mut recordings = lock(&self.recordings);
+                let Some(r) = recordings.get_mut(token) else { return Ok(false) }; // finished meanwhile
+                r.files.entry((ms, track)).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(file))).clone()
+            }
+        };
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut file = file.lock().await;
+            file.write_all(data).await?;
+            file.flush().await?; // on disk (the system's cache) before the next chunk or the merge
         }
-        let mut file = tokio::fs::OpenOptions::new().create(true).append(true).open(&path).await?;
-        tokio::io::AsyncWriteExt::write_all(&mut file, data).await?;
         self.view(|es| {
             if let Some(e) = es.iter().find(|e| e.download.id == id) {
                 e.progress.downloaded.fetch_add(data.len() as u64, Relaxed);
@@ -110,11 +140,12 @@ impl Manager {
 
     /// End of playback: mux the main programme's tracks into the target, then clean up.
     pub fn finish_recording(self: &Arc<Self>, token: &str) -> bool {
-        let Some(r) = lock(&self.recordings).remove(token) else { return false };
+        let Some(mut r) = lock(&self.recordings).remove(token) else { return false };
         let this = self.clone();
         self.inflight.fetch_add(1, AcqRel); // quitting waits (bounded) for the merge
         lock(&self.busy).insert(r.id); // so does removing it: its files are being written
         self.rt.spawn_blocking(move || {
+            r.files.clear(); // closed before they are merged, then deleted
             let result = match r.best_source() {
                 Some(ms) => engine::mux::merge(&r.part(ms, Track::Video), &r.part(ms, Track::Audio), &r.target)
                     .map_err(|e| trf!("fusion audio/vidéo impossible : {e}", "cannot merge audio and video: {e}", e = e)),
@@ -150,7 +181,8 @@ impl Manager {
 
     /// Stops a recording (cancelled in the page, idle, or removed): drops its partial data.
     pub fn cancel_recording(&self, token: &str, reason: &str) -> bool {
-        let Some(r) = lock(&self.recordings).remove(token) else { return false };
+        let Some(mut r) = lock(&self.recordings).remove(token) else { return false };
+        r.files.clear(); // closed before they are deleted
         for (ms, track) in r.parts.keys() {
             let _ = fs::remove_file(r.part(*ms, *track));
         }

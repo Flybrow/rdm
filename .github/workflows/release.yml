@@ -42,12 +42,16 @@ jobs:
         if: runner.os == 'Linux'
         run: sh extension/test/check.sh
 
+      # web-ext and every package under it are pinned with their integrity hashes
+      # (packaging/web-ext/package-lock.json): the signing step below runs it with the AMO keys.
+      # No install script runs.
       - name: Extension builds (Firefox + Chromium) + lint
         if: runner.os == 'Linux'
         run: |
           sh packaging/firefox/build.sh
           sh packaging/chromium/build.sh
-          npx --yes web-ext@8.10.0 lint --self-hosted --source-dir target/firefox
+          npm ci --ignore-scripts --no-audit --no-fund --prefix packaging/web-ext
+          packaging/web-ext/node_modules/.bin/web-ext lint --self-hosted --source-dir target/firefox
 
       - name: Dependency audit (RustSec)
         if: runner.os == 'Linux'
@@ -94,7 +98,7 @@ jobs:
             cp target/debian/*.deb target/generate-rpm/*.rpm dist/
             cp target/rdm-chromium.zip dist/
             if [ -n "$AMO_JWT_ISSUER" ] && [ -n "$AMO_JWT_SECRET" ] && [ "${GITHUB_REF#refs/tags/v}" != "$GITHUB_REF" ]; then
-              npx --yes web-ext@8.10.0 sign --channel=unlisted --source-dir target/firefox --artifacts-dir target/signed \
+              packaging/web-ext/node_modules/.bin/web-ext sign --channel=unlisted --source-dir target/firefox --artifacts-dir target/signed \
                 --api-key "$AMO_JWT_ISSUER" --api-secret "$AMO_JWT_SECRET"
               cp target/signed/*.xpi dist/rdm-firefox.xpi
             else

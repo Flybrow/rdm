@@ -62,6 +62,13 @@ done
 say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
 
+# A path quoted for a desktop entry's Exec= line (Desktop Entry spec): " ` $ \ get a backslash,
+# itself doubled by the value's own escaping; % (field codes) doubled. Same rule as RDM's own
+# autostart entry (crates/app/src/autostart.rs).
+desktop_exec() {
+    printf '"%s"' "$(printf '%s' "$1" | sed -e 's/[\\"`$]/\\\\&/g' -e 's/%/%%/g')"
+}
+
 # ── Privileges (package installs only) ───────────────────────────────────
 as_root() {
     if [ "$(id -u)" -eq 0 ]; then "$@"
@@ -216,8 +223,11 @@ if rdm_running; then
 fi
 mkdir -p "$bin" "$apps"
 install -m 755 "$exe" "$bin/rdm"
-# Absolute Exec: ~/.local/bin is not on the desktop session's PATH everywhere.
-sed "s|^Exec=rdm |Exec=\"$bin/rdm\" |" "$here/rdm.desktop" >"$apps/rdm.desktop"
+# Absolute Exec: ~/.local/bin is not on the desktop session's PATH everywhere. Quoted for the
+# desktop entry, whatever the home folder's name holds (spaces, quotes, &, |…).
+exec_rdm=$(desktop_exec "$bin/rdm")
+EXEC_RDM=$exec_rdm awk '/^Exec=rdm / { sub(/^Exec=rdm /, ""); print "Exec=" ENVIRON["EXEC_RDM"] " " $0; next } { print }' \
+    "$here/rdm.desktop" >"$apps/rdm.desktop"
 chmod 644 "$apps/rdm.desktop"
 # Every size (16 → 512 px) plus the SVG: sharp in the launcher, the dock and the top bar.
 if [ -d "$here/icons/hicolor" ]; then
@@ -248,7 +258,7 @@ if [ "$autostart" -eq 1 ]; then
 [Desktop Entry]
 Type=Application
 Name=RDM
-Exec="$bin/rdm" --minimized
+Exec=$exec_rdm --minimized
 Icon=rdm
 X-GNOME-Autostart-enabled=true
 EOF

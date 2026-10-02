@@ -122,6 +122,10 @@ fn watch(manager: &Weak<Manager>) {
             continue; // unchanged (Windows): nothing read
         }
         sequence = now;
+        // A password manager's copy: not even read.
+        if private_content() {
+            continue;
+        }
         if clipboard.is_none() {
             clipboard = arboard::Clipboard::new().ok();
         }
@@ -142,6 +146,29 @@ fn watch(manager: &Weak<Manager>) {
         if !urls.is_empty() {
             this.clipboard_found(urls);
         }
+    }
+}
+
+/// Whether what is in the clipboard was marked private by the program that copied it: password
+/// managers (KeePass, Bitwarden, 1Password…) add a format asking clipboard monitors not to look
+/// (`ExcludeClipboardContentFromMonitorProcessing`, or the older `Clipboard Viewer Ignore`).
+/// Windows only: elsewhere RDM's clipboard library gives no such sign.
+fn private_content() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::DataExchange::{IsClipboardFormatAvailable, RegisterClipboardFormatW};
+        ["ExcludeClipboardContentFromMonitorProcessing", "Clipboard Viewer Ignore"].iter().any(|name| {
+            let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+            // SAFETY: a NUL-terminated UTF-16 string that outlives the call; registering a format
+            // name only returns its number (the same one every program gets).
+            let format = unsafe { RegisterClipboardFormatW(wide.as_ptr()) };
+            // SAFETY: a plain query; the clipboard need not be open.
+            format != 0 && unsafe { IsClipboardFormatAvailable(format) } != 0
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        false
     }
 }
 

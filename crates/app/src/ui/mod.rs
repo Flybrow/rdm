@@ -36,7 +36,7 @@ use winit::{
 
 use crate::{
     manager::{AddRequest, Entry, Manager, Scan, ScanRefused, Stats},
-    settings::{Settings, Theme},
+    settings::{Queue, Settings, Theme},
     tr, trf,
     shell::{Shell, Wake},
     tray::{self, Tray},
@@ -314,7 +314,7 @@ impl Filter {
         }
     }
 
-    fn title(self, settings: &Settings) -> String {
+    fn title(self, queues: &[Queue]) -> String {
         match self {
             Self::All => tr!("Tous les téléchargements", "All downloads").into(),
             Self::Active => tr!("En cours", "Active").into(),
@@ -322,14 +322,14 @@ impl Filter {
             Self::Done => tr!("Terminés", "Completed").into(),
             Self::Failed => tr!("Échecs", "Failed").into(),
             Self::Kind(c) => crate::i18n::category(c).into(),
-            Self::Queue(q) => queue_name(settings, q),
+            Self::Queue(q) => queue_name(queues, q),
         }
     }
 }
 
 /// A queue's name as shown (the main queue has no name of its own).
-fn queue_name(settings: &Settings, queue: u32) -> String {
-    match settings.queues.iter().find(|q| q.id == queue) {
+fn queue_name(queues: &[Queue], queue: u32) -> String {
+    match queues.iter().find(|q| q.id == queue) {
         Some(q) if !q.name.is_empty() => q.name.clone(),
         Some(q) => {
             let id = q.id;

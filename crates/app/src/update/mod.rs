@@ -44,7 +44,7 @@ mod package;
 
 pub use install::{clean_leftovers, install_linux, installed_exe, relaunch, run_assistant, start_installation};
 use install::work_dir;
-pub use package::download;
+pub use package::{Verified, download};
 
 
 /// What the UI shows about updates.

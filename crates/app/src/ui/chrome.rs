@@ -31,19 +31,19 @@ impl App<'_> {
             .fill(p.sidebar)
             .inner_margin(Margin { left: 14, right: 14, top: 18, bottom: 16 })
             .stroke(Stroke::new(theme::HAIRLINE, p.border));
-        let settings = self.manager.settings();
+        let named = self.manager.with_settings(|s| s.queues.clone());
         // Named queues: shown once there is more than the main one.
-        let queues: Vec<(Filter, usize)> = if settings.queues.is_empty() {
+        let queues: Vec<(Filter, usize)> = if named.is_empty() {
             Vec::new()
         } else {
-            let ids: Vec<u32> = std::iter::once(0).chain(settings.queues.iter().map(|q| q.id)).collect();
+            let ids: Vec<u32> = std::iter::once(0).chain(named.iter().map(|q| q.id)).collect();
             self.manager.view(|es| {
                 ids.iter()
                     .map(|&q| (Filter::Queue(q), es.iter().filter(|e| Filter::Queue(q).accepts(e) && e.download.status() != &domain::Status::Completed).count()))
                     .collect()
             })
         };
-        if matches!(self.memo.filter, Filter::Queue(q) if q != 0 && !settings.queues.iter().any(|x| x.id == q)) {
+        if matches!(self.memo.filter, Filter::Queue(q) if q != 0 && !named.iter().any(|x| x.id == q)) {
             self.memo.filter = Filter::All; // its queue was deleted
         }
         SidePanel::left("nav").exact_width(240.0).resizable(false).frame(frame).show(ctx, |ui| {
@@ -66,14 +66,14 @@ impl App<'_> {
                         Filter::Failed => Some(p.danger),
                         _ => None,
                     };
-                    if nav_item(ui, &p, glyph, hue, &filter.title_short(&settings), n, self.memo.filter == filter) {
+                    if nav_item(ui, &p, glyph, hue, &filter.title_short(&named), n, self.memo.filter == filter) {
                         self.memo.filter = filter;
                     }
                 }
                 if !queues.is_empty() {
                     section_caption(ui, tr!("FILES D'ATTENTE", "QUEUES"));
                     for (filter, n) in queues {
-                        if nav_item(ui, &p, icon::QUEUE, None, &filter.title(&settings), n, self.memo.filter == filter) {
+                        if nav_item(ui, &p, icon::QUEUE, None, &filter.title(&named), n, self.memo.filter == filter) {
                             self.memo.filter = filter;
                         }
                     }
@@ -276,10 +276,10 @@ impl App<'_> {
 }
 
 impl Filter {
-    fn title_short(self, settings: &crate::settings::Settings) -> String {
+    fn title_short(self, queues: &[crate::settings::Queue]) -> String {
         match self {
             Self::All => tr!("Tous", "All").to_owned(),
-            other => other.title(settings),
+            other => other.title(queues),
         }
     }
 }

@@ -1,0 +1,8 @@
+{
+  "name": "rdm-web-ext",
+  "private": true,
+  "description": "Mozilla's web-ext with its whole dependency tree pinned (package-lock.json, integrity hashes): the CI lints the Firefox extension with it, and signs it with the AMO keys in reach.",
+  "devDependencies": {
+    "web-ext": "10.7.0"
+  }
+}

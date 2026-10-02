@@ -10,7 +10,8 @@
 //!   sends `Origin` on POST only: the extension asks with `POST /ping` when it starts);
 //! - no `Origin` (a local program — the native connector, `rdm --quit`, a second launch): only
 //!   with the token RDM writes in the user's private files (see `local`); without it, only
-//!   `GET /ping` and `GET /config` (the Firefox extension's GETs carry no `Origin`);
+//!   `GET /ping` and `GET /config` naming their browser (`x-rdm-browser`: the Firefox extension's
+//!   GETs carry no `Origin`; a web page cannot add that header, so it cannot tell RDM is here);
 //! - `Host`: must be the loopback address, which defeats DNS rebinding;
 //! - JSON bodies (force a CORS preflight we never answer), 64 KiB cap, http(s) URLs only.
 
@@ -143,8 +144,11 @@ fn guard_with(headers: &HeaderMap, token: &str, access: Access, firefox: impl Fn
         return Err(StatusCode::FORBIDDEN);
     }
     match headers.get(ORIGIN).map(|o| o.to_str()) {
+        // The Firefox extension's reads: they say which browser they come from. A web page's
+        // simple GET carries no `Origin` either, but cannot add that header (it would need a CORS
+        // preflight, never answered): it cannot even learn that RDM is installed.
+        None if access == Access::Read && browser_of(headers).is_some_and(crate::extension::valid_key) => Ok(()),
         // A local program: only the user's own (it could read the token in the user's files).
-        None if access == Access::Read => Ok(()),
         None if !token.is_empty() && local::token_matches(token, headers.get(local::TOKEN_HEADER).map(|v| v.as_bytes())) => Ok(()),
         None => Err(StatusCode::FORBIDDEN),
         Some(Ok(o)) if o == EXTENSION_ORIGIN => Ok(()),
@@ -238,7 +242,8 @@ async fn probe(
         return Err(StatusCode::BAD_REQUEST);
     }
     let request_headers = manager::header_map(&req);
-    let client = manager.client(&req.url).await;
+    // An unusable proxy: refused rather than sent around it.
+    let client = manager.client(&req.url).await.map_err(|_| StatusCode::BAD_GATEWAY)?;
     let info = engine::hls_info(&client, &req.url, &request_headers);
     match tokio::time::timeout(PROBE_TIMEOUT, info).await {
         Ok(Ok(info)) => Ok(Json(info)),
@@ -267,7 +272,7 @@ async fn check(
         return Err(StatusCode::BAD_REQUEST);
     }
     let mut request_headers = manager::header_map(&req);
-    let client = manager.client(&req.url).await;
+    let client = manager.client(&req.url).await.map_err(|_| StatusCode::BAD_GATEWAY)?;
     let verdict = async {
         let p = engine::probe(&client, &req.url, &request_headers).await?;
         // The server took another identity than the one asked for: so does the last-byte check.
@@ -547,8 +552,12 @@ mod tests {
         assert_eq!(act(&h(&[])), FORBIDDEN, "no token");
         assert_eq!(act(&h(&[(local::TOKEN_HEADER, &TOKEN.replace('0', "1"))])), FORBIDDEN, "a wrong token");
         assert_eq!(guard_with(&h(&[]), "", Access::Act, |_| false), FORBIDDEN, "no token issued: nobody");
-        // Reading whether RDM is here and what it captures stays open (Firefox's GETs).
-        assert_eq!(guard_with(&h(&[]), TOKEN, Access::Read, |_| false), Ok(()));
+        // Reading whether RDM is here and what it captures: the Firefox extension's GETs (they
+        // name their browser) or the token; not a web page's bare GET (it could tell RDM is here).
+        assert_eq!(guard_with(&h(&[(BROWSER, "firefox")]), TOKEN, Access::Read, |_| false), Ok(()));
+        assert_eq!(guard_with(&h(&[(local::TOKEN_HEADER, TOKEN)]), TOKEN, Access::Read, |_| false), Ok(()));
+        assert_eq!(guard_with(&h(&[]), TOKEN, Access::Read, |_| false), FORBIDDEN, "a web page's simple GET");
+        assert_eq!(guard_with(&h(&[(BROWSER, "Not A Key!")]), TOKEN, Access::Read, |_| false), FORBIDDEN);
         // An origin is judged as an origin, token or not.
         let web = h(&[("origin", "https://evil.example"), (local::TOKEN_HEADER, TOKEN)]);
         assert_eq!(guard_with(&web, TOKEN, Access::Read, |_| false), FORBIDDEN);

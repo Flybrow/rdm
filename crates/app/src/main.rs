@@ -8,6 +8,7 @@ mod local;
 mod manager;
 mod native;
 mod notify;
+mod openpgp;
 mod priority;
 mod secrets;
 mod settings;
@@ -81,7 +82,7 @@ fn main() -> eframe::Result {
     std::thread::spawn(extension::refresh_installed);
     std::thread::spawn(update::clean_leftovers);
     std::thread::spawn(native::register);
-    let manager = Manager::new(rt.handle().clone(), engine::client().expect("http client"), settings);
+    let manager = Manager::new(rt.handle().clone(), settings);
     if let Some(url) = url_arg {
         manager.add(AddRequest::from_url(url));
     }

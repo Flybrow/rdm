@@ -65,15 +65,11 @@ impl Manager {
         Ok(client)
     }
 
-    /// The client for requests on the browser's behalf about `url` (quality lists, link checks).
-    pub async fn client(&self, url: &Url) -> Client {
-        match self.client_for_url(url, false, false).await {
-            Ok(client) => client,
-            Err(_) => {
-                let public_only = !engine::net::reaches_lan(url).await;
-                self.client_for(Route::Direct, false, public_only).unwrap_or_else(|_| self.fallback.clone())
-            }
-        }
+    /// The client for requests on the browser's behalf about `url` (quality lists, link checks,
+    /// names). An unusable proxy address is an error: never a direct connection behind the back of
+    /// a user who counts on the proxy (it would show their address to the site).
+    pub async fn client(&self, url: &Url) -> Result<Client, String> {
+        self.client_for_url(url, false, false).await
     }
 
     /// Settings changed: clients are rebuilt on next use (downloads running keep theirs).

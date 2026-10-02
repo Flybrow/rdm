@@ -4,7 +4,8 @@ use super::*;
 
 impl Manager {
     /// Client for VirusTotal and GitHub (not the download engine's: see `virustotal::client`),
-    /// through the proxy of the settings like downloads; rebuilt when that changes.
+    /// through the proxy of the settings like downloads; rebuilt when that changes. `None` for an
+    /// unusable proxy address: never around the proxy the user counts on.
     pub(super) fn web(&self) -> Option<reqwest::Client> {
         let route = self.route(false);
         let mut web = lock(&self.web);
@@ -13,7 +14,7 @@ impl Manager {
         {
             return Some(client.clone());
         }
-        let client = virustotal::client(&route).or_else(|_| virustotal::client(&engine::Route::System)).ok()?;
+        let client = virustotal::client(&route).ok()?;
         *web = Some((route, client.clone()));
         Some(client)
     }
@@ -137,7 +138,7 @@ impl Manager {
                 return;
             }
             let result = update::install_linux(file.clone()).await;
-            let _ = tokio::fs::remove_file(&file).await;
+            let _ = tokio::fs::remove_file(&file.path).await;
             match result {
                 Ok(()) => {
                     this.restart_after_exit.store(true, Release);

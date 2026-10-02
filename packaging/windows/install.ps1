@@ -21,7 +21,12 @@ $exe = @("$PSScriptRoot\rdm.exe", "$PSScriptRoot\..\..\target\release\rdm.exe") 
 # would not know the option; whatever is left (browser connectors included) is ended.
 if ($exe) { & $exe --quit | Out-Null }
 # Another account's RDM (fast user switching) cannot be ended from here: not a reason to stop.
-Get-Process rdm -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+# Only RDM's own copies (the installed one, the one being installed): another program that happens
+# to be named rdm.exe is left alone.
+$ours = @((Join-Path $dir 'rdm.exe'), $exe) | Where-Object { $_ } | ForEach-Object { [IO.Path]::GetFullPath($_) }
+Get-Process rdm -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -and ($ours -contains [IO.Path]::GetFullPath($_.Path)) } |
+    Stop-Process -Force -ErrorAction SilentlyContinue
 
 if ($Uninstall) {
     Remove-Item (@($dir) + $shortcuts) -Recurse -Force -ErrorAction SilentlyContinue

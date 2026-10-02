@@ -15,7 +15,7 @@ pub use entry::{Entry, Retry, Scan, ScanRefused, Verify};
 pub use recording::Track;
 use browsers::FirefoxPairing;
 use entry::{Launch, load_entries, to_header_map};
-use files::{leftovers, mark_from_internet, remove_recording_leftovers, target_for, unique_path};
+use files::{leftovers, mark_from_internet, planned, remove_recording_leftovers, target_for, unique_path};
 use recording::Recording;
 
 use std::{
@@ -96,8 +96,6 @@ type Callback = Box<dyn Fn() + Send + Sync>;
 
 pub struct Manager {
     rt: Handle,
-    /// Used only if no configured client can be built.
-    fallback: Client,
     /// One client per route (proxy or not, certificate exemption), built on first use.
     clients: Mutex<HashMap<engine::ClientOptions, Client>>,
     /// Site logins and the proxy password (see `secrets`).
@@ -114,6 +112,10 @@ pub struct Manager {
     restart_after_exit: AtomicBool,
     settings: Mutex<Settings>,
     entries: Mutex<Vec<Entry>>,
+    /// Held while a new download's file name is chosen: the disk is looked at outside the list's
+    /// lock (the window reads the list at every frame), and two names chosen at once could
+    /// otherwise be the same. Taken before `entries`, never while holding it.
+    naming: Mutex<()>,
     /// Downloads whose engine task is still alive (even if already paused): never start a second
     /// task on the same file, never delete files under a task that is still writing them.
     busy: Mutex<HashSet<DownloadId>>,
@@ -197,7 +199,7 @@ pub struct Installed {
 
 impl Manager {
     /// `settings`: as loaded at start (their language already applied).
-    pub fn new(rt: Handle, fallback: Client, mut settings: Settings) -> Arc<Self> {
+    pub fn new(rt: Handle, mut settings: Settings) -> Arc<Self> {
         if let Some(dir) = crate::settings::config_file(STORE).parent() {
             let _ = crate::settings::create_private_dir(dir);
         }
@@ -209,7 +211,6 @@ impl Manager {
         limit.set(u64::from(settings.speed_limit_kib) * 1024);
         let this = Arc::new(Self {
             rt,
-            fallback,
             clients: Mutex::default(),
             secrets: Mutex::new(secrets),
             offer: Mutex::default(),
@@ -219,6 +220,7 @@ impl Manager {
             restart_after_exit: AtomicBool::new(false),
             settings: Mutex::new(settings),
             entries: Mutex::new(load_entries()),
+            naming: Mutex::default(),
             busy: Mutex::default(),
             recordings: Mutex::default(),
             limit,

@@ -3,5 +3,8 @@
 
 /*.msi
 /*.xpi
+/*.zip
 
 /*.wixpdb
+
+node_modules/

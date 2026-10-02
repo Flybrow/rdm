@@ -3,7 +3,8 @@
 
 use super::*;
 
-/// The command-line flag of the installation assistant: `rdm --apply-update <msi> <pid> <exe>`.
+/// The command-line flag of the installation assistant: `rdm --apply-update <msi> <pid> <exe>
+/// <sha256>` (the package's SHA-256, checked again just before installing it).
 pub const HELPER_FLAG: &str = "--apply-update";
 
 /// Where the Windows installer puts RDM (per user).
@@ -20,19 +21,24 @@ pub fn installed_exe() -> Option<PathBuf> {
 
 /// Windows: starts the installation assistant for `msi` (see the module docs). The caller quits
 /// right after.
-pub fn start_installation(msi: &Path) -> std::io::Result<()> {
+pub fn start_installation(msi: &Verified) -> std::io::Result<()> {
     let target = installed_exe().ok_or(std::io::ErrorKind::Unsupported)?;
     let helper = std::env::temp_dir().join(format!("rdm-updater-{}.exe", std::process::id()));
     std::fs::copy(startup_exe().map_or_else(std::env::current_exe, |p| Ok(p.to_path_buf()))?, &helper)?;
     let mut command = std::process::Command::new(&helper);
-    command.arg(HELPER_FLAG).arg(msi).arg(std::process::id().to_string()).arg(&target);
+    command.arg(HELPER_FLAG).arg(&msi.path).arg(std::process::id().to_string()).arg(&target).arg(&msi.sha256);
     imp::spawn_outliving(&mut command)
 }
 
 /// Linux: installs the downloaded package (binary replaced in place, or the package manager behind
 /// the system's password prompt). RDM restarts afterwards.
-pub async fn install_linux(package: PathBuf) -> Result<(), String> {
+pub async fn install_linux(package: Verified) -> Result<(), String> {
     tokio::task::spawn_blocking(move || linux::install(method(), &package)).await.map_err(|e| e.to_string())?
+}
+
+/// Whether the file at `path` is still the package that was verified (its SHA-256 `expected`).
+fn unchanged(path: &Path, expected: &str) -> bool {
+    crate::manager::checksum::digest(path, crate::manager::checksum::Algo::Sha256).is_ok_and(|digest| digest.eq_ignore_ascii_case(expected))
 }
 
 /// After quitting for an update: starts the (new) RDM from where it was installed.
@@ -44,11 +50,11 @@ pub fn relaunch() {
 
 /// In the assistant: `true` when `args` asked for it (it then did its job).
 pub fn run_assistant(args: &[String]) -> bool {
-    let [flag, msi, pid, exe] = args else { return false };
+    let [flag, msi, pid, exe, sha256] = args else { return false };
     if flag != HELPER_FLAG {
         return false;
     }
-    imp::apply(Path::new(msi), pid.parse().unwrap_or(0), Path::new(exe));
+    imp::apply(Path::new(msi), pid.parse().unwrap_or(0), Path::new(exe), sha256);
     true
 }
 
@@ -92,12 +98,12 @@ pub fn clean_leftovers() {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::{os::unix::fs::PermissionsExt, path::Path, process::Command};
+    use std::{os::unix::fs::PermissionsExt, process::Command};
 
-    use super::{Method, startup_exe, which};
+    use super::{Method, Verified, startup_exe, unchanged, which};
     use crate::{tr, trf};
 
-    pub fn install(method: Method, package: &Path) -> Result<(), String> {
+    pub fn install(method: Method, package: &Verified) -> Result<(), String> {
         match method {
             Method::Binary => replace_binary(package),
             Method::Deb => {
@@ -118,11 +124,33 @@ mod linux {
         }
     }
 
+    /// Run as root (`sh -c` with the package, its verified SHA-256, then the package manager's
+    /// command): the package is copied where only root can write, checked to be the very file RDM
+    /// verified, and that copy is installed. Another program of the account cannot swap the
+    /// package between RDM's checks and the installation as root. Exit code 3: it was swapped.
+    pub(super) const AS_ROOT: &str = r#"set -eu
+dir=$(mktemp -d)
+trap 'rm -rf "$dir"' EXIT
+copy="$dir/$(basename "$1")"
+cp -- "$1" "$copy"
+chmod 755 "$dir"
+printf '%s  %s\n' "$2" "$copy" | sha256sum -c --status - || exit 3
+shift 2
+"$@" "$copy"
+"#;
+
     /// The package manager, as root after the system's password prompt (polkit).
-    fn elevated(tool: &[&str], package: &Path) -> Result<(), String> {
-        let status = Command::new("pkexec").args(tool).arg(package).status().map_err(|e| e.to_string())?;
+    fn elevated(tool: &[&str], package: &Verified) -> Result<(), String> {
+        let status = Command::new("pkexec")
+            .args(["/bin/sh", "-c", AS_ROOT, "sh"])
+            .arg(&package.path)
+            .arg(&package.sha256)
+            .args(tool)
+            .status()
+            .map_err(|e| e.to_string())?;
         match status.code() {
             Some(0) => Ok(()),
+            Some(3) => Err(tr!("le paquet a été modifié après sa vérification : installation refusée", "the package changed after it was verified: installation refused").into()),
             Some(126 | 127) => Err(tr!("mot de passe refusé ou demande fermée", "password refused or prompt closed").into()),
             Some(c) => Err(trf!("le gestionnaire de paquets a échoué (code {c})", "the package manager failed (code {c})", c = c)),
             None => Err(tr!("installation interrompue", "installation interrupted").into()),
@@ -131,7 +159,12 @@ mod linux {
 
     /// Unpacks the tarball and swaps the binary in place (a rename: the running process keeps its
     /// file until it exits, and a crash half-way leaves the old binary intact).
-    fn replace_binary(archive: &Path) -> Result<(), String> {
+    fn replace_binary(package: &Verified) -> Result<(), String> {
+        // Everything here runs as the user: checked again all the same, just before use.
+        if !unchanged(&package.path, &package.sha256) {
+            return Err(tr!("le paquet a été modifié après sa vérification : installation refusée", "the package changed after it was verified: installation refused").into());
+        }
+        let archive = package.path.as_path();
         let exe = startup_exe().ok_or_else(|| tr!("emplacement de RDM inconnu", "RDM's location is unknown").to_owned())?;
         let work = super::work_dir().map_err(|e| e.to_string())?.join(format!("rdm-update-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&work);
@@ -155,11 +188,9 @@ mod linux {
 
 #[cfg(not(target_os = "linux"))]
 mod linux {
-    use std::path::Path;
+    use super::{Method, Verified};
 
-    use super::Method;
-
-    pub fn install(_: Method, _: &Path) -> Result<(), String> {
+    pub fn install(_: Method, _: &Verified) -> Result<(), String> {
         Err(crate::tr!("mise à jour impossible ici", "cannot update this copy").into())
     }
 }
@@ -197,11 +228,20 @@ mod imp {
         }
     }
 
-    pub fn apply(msi: &Path, pid: u32, exe: &Path) {
+    pub fn apply(msi: &Path, pid: u32, exe: &Path, sha256: &str) {
         wait_for_exit(pid);
         // The single-instance lock (the bridge port) is the last thing RDM lets go.
         wait_until(Duration::from_secs(15), || TcpListener::bind((Ipv4Addr::LOCALHOST, BRIDGE_PORT)).is_ok());
 
+        // Still the package RDM verified (its signature covers this SHA-256)? Never install another.
+        if !super::unchanged(msi, sha256) {
+            crate::notify::fatal(tr!(
+                "La mise à jour de RDM a été modifiée après sa vérification : elle n'est pas installée. RDM redémarre dans sa version actuelle.",
+                "RDM's update changed after it was verified: it is not installed. RDM restarts in its current version."
+            ));
+            let _ = Command::new(exe).spawn();
+            return;
+        }
         let log = msi.with_extension("log");
         // Silent: no window at all; RDM's own card said "installing", and RDM comes back.
         let code = msiexec(&["/i".as_ref(), msi.as_os_str(), "/qn".as_ref(), "/norestart".as_ref(), "/l*v".as_ref(), log.as_os_str()]);
@@ -294,7 +334,7 @@ mod imp {
         Err(std::io::ErrorKind::Unsupported.into())
     }
 
-    pub fn apply(_: &Path, _: u32, _: &Path) {}
+    pub fn apply(_: &Path, _: u32, _: &Path, _: &str) {}
 }
 
 #[cfg(test)]
@@ -304,6 +344,38 @@ mod tests {
     #[test]
     fn assistant_arguments() {
         assert!(!run_assistant(&["--minimized".into()]));
-        assert!(!run_assistant(&["--other".into(), "a".into(), "1".into(), "b".into()]));
+        assert!(!run_assistant(&["--other".into(), "a".into(), "1".into(), "b".into(), "c".into()]));
+        assert!(!run_assistant(&[HELPER_FLAG.into(), "a.msi".into(), "1".into(), "rdm.exe".into()]), "the SHA-256 is required");
+    }
+
+    /// The package is checked again at the last moment against the SHA-256 its signature covers.
+    #[test]
+    fn a_package_changed_after_its_check_is_noticed() {
+        let path = std::env::temp_dir().join(format!("rdm-unchanged-{}.bin", std::process::id()));
+        std::fs::write(&path, b"").unwrap();
+        const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        assert!(unchanged(&path, EMPTY) && unchanged(&path, &EMPTY.to_ascii_uppercase()));
+        std::fs::write(&path, b"swapped").unwrap();
+        assert!(!unchanged(&path, EMPTY));
+        let _ = std::fs::remove_file(&path);
+        assert!(!unchanged(&path, EMPTY), "gone");
+    }
+
+    /// What `pkexec` runs as root: the copy it installs is the verified file, or nothing is.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn root_installs_only_the_verified_copy() {
+        let path = std::env::temp_dir().join(format!("rdm_{}_amd64.deb", std::process::id()));
+        std::fs::write(&path, b"").unwrap();
+        const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let run = |sha: &str, tool: &[&str]| {
+            std::process::Command::new("sh").args(["-c", linux::AS_ROOT, "sh"]).arg(&path).arg(sha).args(tool).status().unwrap().code()
+        };
+        // The tool gets a copy of the same name, in a fresh folder: not the user's file ($1 here).
+        let original = path.to_str().unwrap();
+        let check = r#"test -f "$2" && test "$2" != "$1" && test "$(basename "$2")" = "$(basename "$1")""#;
+        assert_eq!(run(EMPTY, &["sh", "-c", check, "sh", original]), Some(0));
+        assert_eq!(run(&"0".repeat(64), &["true"]), Some(3), "swapped: never installed");
+        let _ = std::fs::remove_file(&path);
     }
 }

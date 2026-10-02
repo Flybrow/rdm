@@ -1,0 +1,2 @@
+# Signed files used by the tests: byte for byte, never line-ending converted.
+crates/app/testdata/** -text

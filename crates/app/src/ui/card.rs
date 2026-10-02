@@ -13,7 +13,7 @@ use super::{
 };
 use crate::{
     manager::{Entry, Scan, Verify},
-    settings::Settings,
+    settings::Queue,
     tr, trf,
     virustotal::Stage,
 };
@@ -30,14 +30,14 @@ impl App<'_> {
         let p = Palette::of(ui);
         let needle = self.memo.search.trim().to_lowercase();
         let filter = self.memo.filter;
-        let settings = self.manager.settings();
+        let queues = self.manager.with_settings(|s| s.queues.clone());
         let animating = self.manager.view(|entries| {
             let visible: Vec<&Entry> = entries
                 .iter()
                 .rev()
                 .filter(|e| filter.accepts(e) && (needle.is_empty() || e.search_key.contains(&needle)))
                 .collect();
-            toolbar(ui, &p, &filter.title(&settings), visible.len(), !needle.is_empty(), actions);
+            toolbar(ui, &p, &filter.title(&queues), visible.len(), !needle.is_empty(), actions);
             if visible.is_empty() {
                 empty_state(ui, &p, entries.is_empty(), !needle.is_empty());
                 return false;
@@ -46,7 +46,7 @@ impl App<'_> {
             ui.spacing_mut().item_spacing.y = CARD_GAP;
             ScrollArea::vertical().auto_shrink(false).show_rows(ui, CARD_HEIGHT, visible.len(), |ui, rows| {
                 for e in &visible[rows] {
-                    animating |= card(ui, &p, &settings, e, actions);
+                    animating |= card(ui, &p, &queues, e, actions);
                 }
                 ui.add_space(8.0);
             });
@@ -96,7 +96,7 @@ fn status_style(p: &Palette, e: &Entry) -> (&'static str, Color32) {
 
 /// One download. Returns whether it animates (a spinner): plain progress is redrawn at a lower
 /// rate by the caller.
-fn card(ui: &mut Ui, p: &Palette, settings: &Settings, e: &Entry, actions: &mut Vec<Action>) -> bool {
+fn card(ui: &mut Ui, p: &Palette, queues: &[Queue], e: &Entry, actions: &mut Vec<Action>) -> bool {
     let d = &e.download;
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), CARD_HEIGHT), Sense::click());
     if !ui.is_rect_visible(rect) {
@@ -173,7 +173,7 @@ fn card(ui: &mut Ui, p: &Palette, settings: &Settings, e: &Entry, actions: &mut 
     let middle = Rect::from_min_max(pos2(left, rect.top()), pos2(x.max(left + 60.0), rect.bottom()));
     let name = Rect::from_min_size(pos2(middle.left(), rect.top() + 14.0), vec2(middle.width(), 22.0));
     widgets::place(ui, name, |ui| {
-        for (glyph, tint, tip) in markers(p, settings, e) {
+        for (glyph, tint, tip) in markers(p, queues, e) {
             ui.label(RichText::new(glyph).font(theme::regular(14.0)).color(tint)).on_hover_text(tip);
         }
         ui.add(Label::new(RichText::new(&e.name).font(theme::semibold(14.5)).color(p.text)).truncate().selectable(false))
@@ -210,17 +210,17 @@ fn card(ui: &mut Ui, p: &Palette, settings: &Settings, e: &Entry, actions: &mut 
     if response.double_clicked() && *status == Status::Completed {
         actions.push(Action::Open(d.target.clone()));
     }
-    response.context_menu(|ui| context_menu(ui, p, settings, e, actions));
+    response.context_menu(|ui| context_menu(ui, p, queues, e, actions));
     moving || matches!(e.verify, Verify::Running)
 }
 
 /// Small icons before the name: its queue, its own speed limit, an accepted certificate, the
 /// proxy route.
-fn markers(p: &Palette, settings: &Settings, e: &Entry) -> Vec<(&'static str, Color32, String)> {
+fn markers(p: &Palette, queues: &[Queue], e: &Entry) -> Vec<(&'static str, Color32, String)> {
     let d = &e.download;
     let mut marks = Vec::new();
-    if d.queue != 0 && settings.queues.iter().any(|q| q.id == d.queue) {
-        marks.push((icon::QUEUE, p.accent, trf!("File : {}", "Queue: {}", queue_name(settings, d.queue))));
+    if d.queue != 0 && queues.iter().any(|q| q.id == d.queue) {
+        marks.push((icon::QUEUE, p.accent, trf!("File : {}", "Queue: {}", queue_name(queues, d.queue))));
     }
     if d.speed_limit_kib > 0 {
         let limit = speed(f64::from(d.speed_limit_kib) * 1024.0);
@@ -350,7 +350,7 @@ fn stage_text(stage: Stage) -> String {
     }
 }
 
-fn context_menu(ui: &mut Ui, p: &Palette, settings: &Settings, e: &Entry, actions: &mut Vec<Action>) {
+fn context_menu(ui: &mut Ui, p: &Palette, queues: &[Queue], e: &Entry, actions: &mut Vec<Action>) {
     ui.set_min_width(270.0);
     let d = &e.download;
     let item = |ui: &mut Ui, glyph: &str, label: &str, color: Color32| {
@@ -397,11 +397,11 @@ fn context_menu(ui: &mut Ui, p: &Palette, settings: &Settings, e: &Entry, action
             if item(ui, icon::GAUGE, tr!("Limiter la vitesse…", "Limit the speed…"), p.text) {
                 actions.push(Action::Edit(d.id, Field::SpeedLimit));
             }
-            if !settings.queues.is_empty() {
+            if !queues.is_empty() {
                 ui.menu_button(RichText::new(format!("{}   {}", icon::QUEUE, tr!("Déplacer vers", "Move to"))).font(theme::regular(13.5)).color(p.text), |ui| {
-                    for queue in std::iter::once(0).chain(settings.queues.iter().map(|q| q.id)) {
+                    for queue in std::iter::once(0).chain(queues.iter().map(|q| q.id)) {
                         let mark = if d.queue == queue { "● " } else { "   " };
-                        if ui.button(format!("{mark}{}", queue_name(settings, queue))).clicked() {
+                        if ui.button(format!("{mark}{}", queue_name(queues, queue))).clicked() {
                             actions.push(Action::MoveToQueue(d.id, queue));
                             ui.close();
                         }

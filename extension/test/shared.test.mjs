@@ -51,6 +51,15 @@ test("site comparison for SameSite cookies", () => {
   assert.notEqual(siteOf("https://www.bbc.co.uk/"), siteOf("https://evil.co.uk/"), "a country's second level is not a site");
   assert.equal(siteOf("https://example.com/"), siteOf("https://EXAMPLE.com.:8443/x"));
   assert.notEqual(siteOf("https://example.com/"), siteOf("https://example.com.evil.io/"));
+  assert.equal(siteOf("https://www.zdf.de/"), siteOf("https://cdn.zdf.de/seg.ts"));
+  assert.equal(siteOf("https://www.tf1.fr/"), siteOf("https://videos.tf1.fr/"));
+  assert.equal(siteOf("https://www.amazon.co.jp/"), siteOf("https://images.amazon.co.jp/"));
+  assert.notEqual(siteOf("https://shop.com.au/"), siteOf("https://other.com.au/"));
+  assert.notEqual(siteOf("https://alice.github.io/"), siteOf("https://bob.github.io/"));
+  assert.equal(siteOf("https://alice.github.io/a"), siteOf("https://alice.github.io/b"));
+  assert.notEqual(siteOf("https://a.s3.amazonaws.com/"), siteOf("https://b.s3.amazonaws.com/"));
+  assert.notEqual(siteOf("https://github.io/"), siteOf("https://bob.github.io/"));
+  assert.equal(siteOf("https://github.com/"), siteOf("https://api.github.com/"), "only the platform's own suffix");
 });
 
 test("file name of a Content-Disposition header", () => {

@@ -110,8 +110,29 @@ impl std::fmt::Display for Error {
 /// A separate client from the download engine's (also used for GitHub): uploads can take long (no
 /// read timeout), and HTTP/2 is fine here. Same route as downloads (the proxy of the settings).
 pub fn client(route: &engine::Route) -> reqwest::Result<Client> {
-    let builder = Client::builder().connect_timeout(Duration::from_secs(15)).user_agent(concat!("RDM/", env!("CARGO_PKG_VERSION")));
+    // The API key (`x-apikey`) is not a header the HTTP client knows to drop on a redirect to
+    // another site: a redirect out of VirusTotal is not followed. GitHub's downloads (same
+    // client) do move to its storage servers.
+    let redirects = reqwest::redirect::Policy::custom(|attempt| {
+        let from = attempt.previous().last();
+        if from.is_some_and(|from| !redirect_keeps_key(from, attempt.url())) {
+            attempt.stop()
+        } else if attempt.previous().len() > 10 {
+            attempt.error("too many redirects")
+        } else {
+            attempt.follow()
+        }
+    });
+    let builder = Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .redirect(redirects)
+        .user_agent(concat!("RDM/", env!("CARGO_PKG_VERSION")));
     engine::route(builder, route)?.build()
+}
+
+/// A redirect from `from` to `to` may be followed: anything but leaving VirusTotal.
+fn redirect_keeps_key(from: &url::Url, to: &url::Url) -> bool {
+    !is_virustotal(from.as_str()) || is_virustotal(to.as_str())
 }
 
 pub type OnStage = Arc<dyn Fn(Stage) + Send + Sync>;
@@ -311,6 +332,12 @@ mod tests {
         for elsewhere in ["http://www.virustotal.com/_ah/upload/x", "https://virustotal.com.evil.io/x", "https://evil.io/www.virustotal.com", "nonsense"] {
             assert!(!is_virustotal(elsewhere), "{elsewhere}");
         }
+        let u = |s: &str| s.parse::<url::Url>().unwrap();
+        assert!(redirect_keeps_key(&u("https://www.virustotal.com/api/v3/x"), &u("https://www.virustotal.com/api/v3/y")));
+        assert!(!redirect_keeps_key(&u("https://www.virustotal.com/api/v3/x"), &u("https://evil.io/")), "the key would follow");
+        assert!(!redirect_keeps_key(&u("https://www.virustotal.com/x"), &u("http://www.virustotal.com/x")), "not in clear");
+        let github = u("https://github.com/o/r/releases/download/v1/a.msi");
+        assert!(redirect_keeps_key(&github, &u("https://release-assets.githubusercontent.com/a")), "GitHub's downloads still work");
     }
 
     #[test]

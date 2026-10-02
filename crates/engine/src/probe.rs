@@ -254,10 +254,13 @@ fn percent_decode(s: &str) -> String {
 }
 
 const MAX_NAME_CHARS: usize = 180;
+/// Linux file systems count bytes, 255 at most: 180 Japanese or Cyrillic characters would not fit
+/// (2–3 bytes each). Room is left for what RDM appends: ` (12)`, `.video.part.rdm.tmp`, `.rec….video`.
+const MAX_NAME_BYTES: usize = 200;
 
 /// Untrusted name (server, web page) → a single safe path component on Windows and Linux:
 /// no separators or traversal, no reserved device names, no text-direction tricks, bounded
-/// length, extension kept.
+/// length (in characters and in bytes), extension kept.
 pub fn sanitize_file_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
@@ -272,8 +275,19 @@ pub fn sanitize_file_name(name: &str) -> String {
         Some((s, e)) if !s.is_empty() && e.chars().count() <= 16 => (s, Some(e)),
         _ => (cleaned, None),
     };
-    let budget = MAX_NAME_CHARS.saturating_sub(ext.map_or(0, |e| e.chars().count() + 1));
-    let mut stem: String = stem.chars().take(budget).collect::<String>().trim_end().to_owned();
+    let chars = MAX_NAME_CHARS.saturating_sub(ext.map_or(0, |e| e.chars().count() + 1));
+    let bytes = MAX_NAME_BYTES.saturating_sub(ext.map_or(0, |e| e.len() + 1));
+    let mut used = 0;
+    let mut stem: String = stem
+        .chars()
+        .take(chars)
+        .take_while(|c| {
+            used += c.len_utf8();
+            used <= bytes
+        })
+        .collect::<String>()
+        .trim_end()
+        .to_owned();
 
     // Windows ignores trailing spaces here: "NUL .txt" is the NUL device too.
     let device = stem.split('.').next().unwrap_or_default().trim_end().to_uppercase();
@@ -359,5 +373,18 @@ mod tests {
         let long = format!("{}.mp4", "a".repeat(500));
         let safe = sanitize_file_name(&long);
         assert!(safe.chars().count() <= MAX_NAME_CHARS && safe.ends_with(".mp4"));
+    }
+
+    /// Regression (Linux: "File name too long"): a long Japanese, Cyrillic or emoji title stays
+    /// within the 255 bytes of a Linux file name, with room for the temporary suffixes.
+    #[test]
+    fn long_names_fit_linux_file_systems() {
+        for unit in ["あ", "Ж", "🎬", "a"] {
+            let safe = sanitize_file_name(&format!("{}.mp4", unit.repeat(300)));
+            assert!(safe.len() <= MAX_NAME_BYTES && safe.ends_with(".mp4"), "{unit}: {} bytes", safe.len());
+            assert!(safe.len() + " (999)".len() + ".video.part.rdm.tmp".len() <= 255);
+            assert!(safe.starts_with(unit), "never cut inside a character");
+        }
+        assert_eq!(sanitize_file_name("été.mp4"), "été.mp4", "short names untouched");
     }
 }

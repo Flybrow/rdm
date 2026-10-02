@@ -4,7 +4,10 @@ use std::{
     collections::HashMap,
     io::SeekFrom,
     path::Path,
-    sync::{Arc, Mutex, PoisonError, atomic::Ordering::Relaxed},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicU64, AtomicUsize, Ordering::*},
+    },
     time::Duration,
 };
 
@@ -23,11 +26,18 @@ use crate::{EngineError, Job, Outcome, Progress, RateLimit, merged::Split, net, 
 
 const RETRIES: u32 = 8;
 const MAX_PLAYLIST_BYTES: u64 = 16 << 20;
+/// More segments than this is not a video (a day of 1-second segments is 86,400): refused rather
+/// than filling memory with their addresses.
+const MAX_PARTS: usize = 200_000;
 /// A single segment larger than this is not a segment: refuse instead of exhausting memory.
 const MAX_PART_BYTES: u64 = 256 << 20;
-/// Segments held in memory while waiting to be written in order. 8 keep a fast line busy: on a
-/// 600 MB 1080p stream, as fast as 16, with a third less memory.
+/// Segments fetched at once, held in memory while waiting to be written in order. 8 keep a fast
+/// line busy: on a 600 MB 1080p stream, as fast as 16, with a third less memory.
 const MAX_IN_FLIGHT: usize = 8;
+/// Memory those segments may take together (per track): past it, a segment's connection waits for
+/// the ones before it to be written. Usual segments (a few MB) never get near it; huge ones (a
+/// hostile or odd stream) no longer pile up 8 × 256 MB.
+const MEMORY_BUDGET: u64 = 128 << 20;
 /// Memory set aside for a segment before it arrives, at most (see `get_once`).
 const RESERVE_MAX: u64 = 16 << 20;
 /// Resume state written this often while downloading (data synced first).
@@ -92,6 +102,69 @@ struct Http<'a> {
     keys: Mutex<HashMap<Url, Arc<[u8]>>>,
     limit: &'a RateLimit,
     own_limit: &'a RateLimit,
+}
+
+/// The memory of one track's segments waiting to be written in order (see `MEMORY_BUDGET`).
+/// Over budget, a segment waits — its connection pauses — unless it is the next one to write:
+/// that one never waits, since writing it is what frees memory.
+struct Budget {
+    limit: u64,
+    held: AtomicU64,
+    /// Position (among the segments fetched) of the next one to write.
+    next: AtomicUsize,
+    changed: tokio::sync::Notify,
+}
+
+impl Budget {
+    fn new(limit: u64) -> Self {
+        Self { limit, held: AtomicU64::new(0), next: AtomicUsize::new(0), changed: tokio::sync::Notify::new() }
+    }
+
+    /// Segment `index` was written: the next one may go on.
+    fn written(&self, index: usize) {
+        self.next.store(index + 1, Release);
+        self.changed.notify_waiters();
+    }
+}
+
+/// The bytes of one segment counted in a [`Budget`], given back when dropped (written, failed or
+/// cancelled).
+struct Held<'a> {
+    budget: &'a Budget,
+    index: usize,
+    bytes: u64,
+}
+
+impl<'a> Held<'a> {
+    fn new(budget: &'a Budget, index: usize) -> Self {
+        Self { budget, index, bytes: 0 }
+    }
+
+    /// `n` more bytes of this segment are in memory: waits while the budget is exceeded, unless
+    /// this segment is the next to write.
+    async fn grow(&mut self, n: u64) {
+        self.bytes += n;
+        self.budget.held.fetch_add(n, AcqRel);
+        loop {
+            // Registered before looking, so a release in between is not missed.
+            let changed = self.budget.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.budget.held.load(Acquire) <= self.budget.limit || self.budget.next.load(Acquire) == self.index {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        if self.bytes > 0 {
+            self.budget.held.fetch_sub(self.bytes, AcqRel);
+            self.budget.changed.notify_waiters();
+        }
+    }
 }
 
 pub(crate) async fn info(client: &Client, url: &Url, headers: &HeaderMap) -> Result<HlsInfo, EngineError> {
@@ -202,8 +275,9 @@ async fn download(
     report(&resume);
     progress.active.store(connections.into(), Relaxed);
 
-    let mut fetched = stream::iter(parts.into_iter().skip(resume.done))
-        .map(|part| fetch_part(http, part))
+    let budget = Budget::new(MEMORY_BUDGET);
+    let mut fetched = stream::iter(parts.into_iter().skip(resume.done).enumerate())
+        .map(|(index, part)| fetch_part(http, part, (&budget, index)))
         .buffered(usize::from(connections).clamp(1, MAX_IN_FLIGHT));
 
     // A crash or a kill mid-download loses at most this much (the segmented engine does the same).
@@ -223,9 +297,13 @@ async fn download(
         match next {
             None => break Ok(Outcome::Completed),
             Some(Err(e)) => break Err(e),
-            Some(Ok(data)) => {
+            Some(Ok((data, held))) => {
                 if let Err(e) = file.write_all(&data).await {
                     break Err(e.into());
+                }
+                // Its memory goes back (as `held` drops), and the next segment may grow.
+                if let Some(held) = held {
+                    budget.written(held.index);
                 }
                 resume.done += 1;
                 resume.bytes += data.len() as u64;
@@ -257,7 +335,7 @@ async fn save_state(state: &Path, resume: &Resume) -> std::io::Result<()> {
 }
 
 async fn load(http: &Http<'_>, url: &Url) -> Result<Playlist, EngineError> {
-    let body = get(http, url, None, MAX_PLAYLIST_BYTES).await?;
+    let (body, _) = get(http, url, None, MAX_PLAYLIST_BYTES, None).await?;
     parse(url, &String::from_utf8_lossy(&body))
 }
 
@@ -364,6 +442,9 @@ fn parse_media(base: &Url, text: &str) -> Result<Vec<Part>, EngineError> {
             parts.push(Part { url, key: key.clone(), seq, range });
             seq = seq.wrapping_add(1);
         }
+        if parts.len() > MAX_PARTS {
+            return Err(EngineError::Playlist("too many segments"));
+        }
     }
     if parts.is_empty() {
         return Err(EngineError::Playlist("empty playlist"));
@@ -381,37 +462,47 @@ fn parse_byterange(v: &str) -> Option<(u64, Option<u64>)> {
     (len > 0 && len <= MAX_PART_BYTES).then_some((len, offset))
 }
 
-async fn fetch_part(http: &Http<'_>, part: Part) -> Result<Vec<u8>, EngineError> {
-    let data = get(http, &part.url, part.range, MAX_PART_BYTES).await?;
+/// One segment, decrypted, with the memory it holds in its track's budget (`index`: its position
+/// among the segments fetched).
+async fn fetch_part<'b>(http: &Http<'_>, part: Part, budget: (&'b Budget, usize)) -> Result<(Vec<u8>, Option<Held<'b>>), EngineError> {
+    let (data, held) = get(http, &part.url, part.range, MAX_PART_BYTES, Some(budget)).await?;
     // Dropped with the stream on cancel.
     http.limit.take(data.len()).await;
     http.own_limit.take(data.len()).await;
-    let Some(key) = part.key else { return Ok(data) };
+    let Some(key) = part.key else { return Ok((data, held)) };
     let cached = http.keys.lock().unwrap_or_else(PoisonError::into_inner).get(&key.url).cloned();
     let secret = match cached {
         Some(k) => k,
         None => {
-            let k: Arc<[u8]> = get(http, &key.url, None, 1024).await?.into();
+            let k: Arc<[u8]> = get(http, &key.url, None, 1024, None).await?.0.into();
             http.keys.lock().unwrap_or_else(PoisonError::into_inner).insert(key.url, k.clone());
             k
         }
     };
     let iv = key.iv.unwrap_or_else(|| u128::from(part.seq).to_be_bytes());
-    cbc::Decryptor::<aes::Aes128>::new_from_slices(&secret, &iv)
+    let plain = cbc::Decryptor::<aes::Aes128>::new_from_slices(&secret, &iv)
         .map_err(|_| EngineError::Playlist("invalid AES key"))?
         .decrypt_padded_vec_mut::<Pkcs7>(&data)
-        .map_err(|_| EngineError::Playlist("decryption failed"))
+        .map_err(|_| EngineError::Playlist("decryption failed"))?;
+    Ok((plain, held))
 }
 
-/// GET with retries, an optional (offset, length) byte range and a hard size cap.
-async fn get(http: &Http<'_>, url: &Url, range: Option<(u64, u64)>, max: u64) -> Result<Vec<u8>, EngineError> {
+/// GET with retries, an optional (offset, length) byte range and a hard size cap. A segment's
+/// bytes count in its track's `budget` (see [`Budget`]) as they arrive.
+async fn get<'b>(
+    http: &Http<'_>,
+    url: &Url,
+    range: Option<(u64, u64)>,
+    max: u64,
+    budget: Option<(&'b Budget, usize)>,
+) -> Result<(Vec<u8>, Option<Held<'b>>), EngineError> {
     if !net::allowed_hop(http.origin, url) {
         return Err(EngineError::LocalNetwork);
     }
     let mut attempt = 0;
     loop {
-        match get_once(http, url, range, max).await {
-            Ok(data) => return Ok(data),
+        match get_once(http, url, range, max, budget).await {
+            Ok(fetched) => return Ok(fetched),
             Err(e) if attempt >= RETRIES || e.is_permanent() => return Err(e),
             Err(e) => {
                 e.forget_address();
@@ -422,7 +513,13 @@ async fn get(http: &Http<'_>, url: &Url, range: Option<(u64, u64)>, max: u64) ->
     }
 }
 
-async fn get_once(http: &Http<'_>, url: &Url, range: Option<(u64, u64)>, max: u64) -> Result<Vec<u8>, EngineError> {
+async fn get_once<'b>(
+    http: &Http<'_>,
+    url: &Url,
+    range: Option<(u64, u64)>,
+    max: u64,
+    budget: Option<(&'b Budget, usize)>,
+) -> Result<(Vec<u8>, Option<Held<'b>>), EngineError> {
     // The page's cookies and the site's login stay on the playlist's site.
     let headers = net::headers_for(http.headers, http.origin, url).into_owned();
     let mut req = http.client.get(url.clone()).headers(headers);
@@ -431,6 +528,13 @@ async fn get_once(http: &Http<'_>, url: &Url, range: Option<(u64, u64)>, max: u6
         req = req.header(reqwest::header::RANGE, format!("bytes={offset}-{last}"));
     }
     let res = req.send().await?.error_for_status()?;
+    // A 206 for another slice (a broken proxy or CDN) would put the wrong bytes in the video.
+    if let Some((offset, _)) = range
+        && res.status() == reqwest::StatusCode::PARTIAL_CONTENT
+        && crate::content_range(res.headers()).map(|(start, _)| start) != Some(offset)
+    {
+        return Err(EngineError::RangeIgnored);
+    }
 
     // How many bytes to read, and where the wanted slice starts within them.
     let (skip, want) = match range {
@@ -452,9 +556,15 @@ async fn get_once(http: &Http<'_>, url: &Url, range: Option<(u64, u64)>, max: u6
     // size: the announced length is the server's word, not data received.
     let announced = res.content_length().unwrap_or(0).min(want).min(RESERVE_MAX);
     let mut body = Vec::with_capacity(usize::try_from(announced).unwrap_or(0));
+    // Dropped on failure: what this attempt read goes back to the budget.
+    let mut held = budget.map(|(budget, index)| Held::new(budget, index));
     let mut stream = res.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        body.extend_from_slice(&chunk?);
+        let chunk = chunk?;
+        body.extend_from_slice(&chunk);
+        if let Some(held) = &mut held {
+            held.grow(chunk.len() as u64).await;
+        }
         let read = body.len() as u64;
         if range.is_some() && read >= want {
             break; // got the slice: the rest (if any) is not ours
@@ -463,10 +573,10 @@ async fn get_once(http: &Http<'_>, url: &Url, range: Option<(u64, u64)>, max: u6
             return Err(EngineError::Playlist("too large"));
         }
     }
-    let Some((_, len)) = range else { return Ok(body) };
+    let Some((_, len)) = range else { return Ok((body, held)) };
     let (start, end) = (usize::try_from(skip), usize::try_from(skip + len));
     match (start, end) {
-        (Ok(s), Ok(e)) => body.get(s..e).map(<[u8]>::to_vec).ok_or(EngineError::Truncated),
+        (Ok(s), Ok(e)) => body.get(s..e).map(|slice| (slice.to_vec(), held)).ok_or(EngineError::Truncated),
         _ => Err(EngineError::Truncated),
     }
 }
@@ -580,6 +690,34 @@ mod tests {
         assert!(parse_byterange("18446744073709551615@1").is_none());
         let overflow = "#EXTM3U\n#EXT-X-MAP:URI=\"main.mp4\",BYTERANGE=\"616@18446744073709551615\"\n#EXTINF:6,\nmain.mp4\n";
         assert!(parse(&base(), overflow).is_err(), "an init segment past the end of any file");
+    }
+
+    /// Segments arriving ahead of their turn wait once the budget is used up; the next one to write
+    /// never waits (writing it is what frees memory), and once it is written the next one goes on.
+    #[tokio::test]
+    async fn segments_wait_for_memory_except_the_next_to_write() {
+        let budget = Budget::new(100);
+        let (mut head, mut later) = (Held::new(&budget, 0), Held::new(&budget, 1));
+        later.grow(80).await;
+        assert!(tokio::time::timeout(Duration::from_millis(50), later.grow(80)).await.is_err(), "over budget, not its turn");
+        head.grow(500).await; // its turn: never held back
+        assert_eq!(budget.held.load(Acquire), 660);
+        let written = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            budget.written(0);
+            drop(head);
+        };
+        let (_, went_on) = tokio::join!(written, tokio::time::timeout(Duration::from_secs(5), later.grow(10)));
+        assert!(went_on.is_ok(), "now the next to write");
+        drop(later);
+        assert_eq!(budget.held.load(Acquire), 0, "everything given back");
+    }
+
+    #[test]
+    fn refuses_endless_playlists() {
+        let mut text = String::from("#EXTM3U\n");
+        text.push_str(&"#EXTINF:1,\na.ts\n".repeat(MAX_PARTS + 1));
+        assert!(matches!(parse(&base(), &text), Err(EngineError::Playlist("too many segments"))));
     }
 
     #[test]

@@ -133,6 +133,15 @@ impl EngineError {
     }
 }
 
+/// `Content-Range: bytes <start>-<end>/<total>` of a partial answer: where it starts, and the
+/// file's size when the server tells it (`*`: unknown).
+pub(crate) fn content_range(headers: &HeaderMap) -> Option<(u64, Option<u64>)> {
+    let value = headers.get(header::CONTENT_RANGE)?.to_str().ok()?.trim();
+    let (range, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let start = range.split_once('-')?.0.trim().parse().ok()?;
+    Some((start, total.trim().parse().ok()))
+}
+
 /// How long a server asks to wait before the next request (`Retry-After`: seconds, or a date).
 pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     let value = headers.get(header::RETRY_AFTER)?.to_str().ok()?.trim();
