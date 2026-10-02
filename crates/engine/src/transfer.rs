@@ -707,7 +707,19 @@ impl Active {
 
     /// Leaves only if another connection stays active, so the last one never gives up.
     fn try_leave(&mut self) -> bool {
-        self.left = self.ctx.progress.active.fetch_update(AcqRel, Acquire, |n| (n > 1).then(|| n - 1)).is_ok();
+        // A compare-and-swap loop: `fetch_update` is deprecated from Rust 1.99, and its successor
+        // (`try_update`) does not exist in the oldest Rust RDM builds with (`rust-version`).
+        let active = &self.ctx.progress.active;
+        let mut n = active.load(Acquire);
+        self.left = loop {
+            if n <= 1 {
+                break false;
+            }
+            match active.compare_exchange_weak(n, n - 1, AcqRel, Acquire) {
+                Ok(_) => break true,
+                Err(now) => n = now,
+            }
+        };
         self.left
     }
 }
