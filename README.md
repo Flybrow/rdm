@@ -140,8 +140,10 @@ Privacy: an uploaded file is shared with antivirus vendors. Do not analyse your 
 
 **Firefox** (140 or later) only keeps extensions **signed by Mozilla**.
 
+- **Firefox and its derivatives**: **Install** opens the extension's page in the [Firefox store](https://addons.mozilla.org/firefox/addon/rdm-rust-download-manager/) → **Add to Firefox** → **Add**: installed for good, kept up to date by the browser. If the browser cannot be opened on it, or with **Store not opening? Install without the store**, RDM falls back to the package it ships (below).
+
 - **Waterfox** (a Firefox derivative, same extension): **Install** opens the `rdm-firefox.xpi` package in Waterfox → **Add**. Waterfox accepts unsigned extensions: it stays installed (tested with Waterfox 6.7). After an RDM update, *Reinstall* brings the extension to its new version.
-- If the GitHub release contains a signed `rdm-firefox.xpi` (the CI signs it when the `AMO_JWT_ISSUER` / `AMO_JWT_SECRET` secrets of a free addons.mozilla.org account are set; the extension is not published for all that), **Install** downloads it and Firefox offers to **Add** it: for good.
+- If the GitHub release contains a signed `rdm-firefox.xpi` (the CI signs it when the `AMO_JWT_ISSUER` / `AMO_JWT_SECRET` secrets of a free addons.mozilla.org account are set), **Install** downloads it and Firefox offers to **Add** it: for good.
 - Otherwise RDM opens `about:debugging`: **Load Temporary Add-on…** → `manifest.json` of the folder shown. A temporary add-on goes away when Firefox closes. Firefox Developer Edition, Nightly, ESR (`xpinstall.signatures.required` set to `false`) and LibreWolf keep the `rdm-firefox.xpi` file RDM writes next to it installed for good.
 - Firefox gives each installation a random origin (`moz-extension://…`): the connector pairs it with RDM automatically. Without the connector, **RDM asks you to allow it** → **Allow**; until then the extension's icon shows a **!** badge and a message in the page explains why (✕ postpones the question by 30 minutes; **Deny** rejects it until RDM restarts).
 

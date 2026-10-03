@@ -457,6 +457,8 @@ struct App<'a> {
     confirm_delete: Option<DownloadId>,
     /// "Don't ask again" ticked in the browser download's confirmation.
     confirm_always: bool,
+    /// An update was just installed: its release notes are shown.
+    changelog: bool,
     toasts: Toasts,
     /// Something on screen moves this frame (progress, spinner): keep redrawing.
     animating: bool,
@@ -501,6 +503,7 @@ impl<'a> App<'a> {
             edit: None,
             confirm_delete: None,
             confirm_always: false,
+            changelog: false,
             toasts: Toasts::default(),
             animating: false,
             settle_frames: 0,
@@ -508,8 +511,24 @@ impl<'a> App<'a> {
             paced,
             last_frame: None,
         };
+        app.offer_changelog();
         app.offer_extension();
         app
+    }
+
+    /// First start of a new version: its release notes, unless RDM was just installed (first launch).
+    /// RDM 0.3.11 and older did not note their version: having offered the extension says they ran.
+    fn offer_changelog(&mut self) {
+        let current = env!("CARGO_PKG_VERSION");
+        let (last, ran_before) = self.manager.with_settings(|s| (s.last_version.clone(), s.extension_offered));
+        if last == current {
+            return;
+        }
+        self.changelog = if last.is_empty() { ran_before } else { true };
+        let mut settings = self.manager.settings();
+        settings.last_version = current.to_owned();
+        self.manager.apply_settings(settings);
+        self.manager.save_settings();
     }
 
     /// First launch without the extension anywhere: the extension window opens by itself, once.
@@ -673,7 +692,7 @@ impl eframe::App for App<'_> {
         // A dialog or menu closing: two more frames at once, without it. egui matches clicks
         // against the previous frame, and keeps a dialog's modal layer one frame longer: otherwise
         // the next click would still hit the closed dialog and be lost.
-        let overlays = (self.settings.is_some(), self.report.is_some(), self.browsers.is_some(), self.edit.is_some(), self.confirm_delete.is_some());
+        let overlays = (self.settings.is_some(), self.report.is_some(), self.browsers.is_some(), self.edit.is_some(), self.confirm_delete.is_some(), self.changelog);
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.settle_frames = 2;
         }
@@ -703,8 +722,9 @@ impl eframe::App for App<'_> {
         self.delete_dialog(ctx);
         self.firefox_prompt(ctx);
         self.confirm_prompt(ctx);
+        self.changelog_dialog(ctx);
         self.apply(ctx, actions);
-        if overlays != (self.settings.is_some(), self.report.is_some(), self.browsers.is_some(), self.edit.is_some(), self.confirm_delete.is_some()) {
+        if overlays != (self.settings.is_some(), self.report.is_some(), self.browsers.is_some(), self.edit.is_some(), self.confirm_delete.is_some(), self.changelog) {
             self.settle_frames = 2;
         }
         if self.settle_frames > 0 {

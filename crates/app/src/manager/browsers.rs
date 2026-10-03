@@ -232,8 +232,18 @@ impl Manager {
         lock(&self.installs).get(&browser).cloned()
     }
 
-    /// Prepares the extension for `browser` and opens the browser where the user confirms it.
+    /// Prepares the extension for `browser` and opens the browser where the user confirms it
+    /// (Firefox and its derivatives: the Firefox store first).
     pub fn install_extension(self: &Arc<Self>, browser: Browser) {
+        self.install_extension_with(browser, true);
+    }
+
+    /// Same, without the Firefox store: the package RDM ships (signed, or the temporary add-on).
+    pub fn install_extension_without_store(self: &Arc<Self>, browser: Browser) {
+        self.install_extension_with(browser, false);
+    }
+
+    fn install_extension_with(self: &Arc<Self>, browser: Browser, store: bool) {
         self.forget_uninstall(browser.key());
         if matches!(lock(&self.installs).insert(browser, Install::Working), Some(Install::Working)) {
             return; // already on it
@@ -241,7 +251,7 @@ impl Manager {
         self.repaint();
         let this = self.clone();
         self.rt.spawn(async move {
-            let state = match this.install(browser).await {
+            let state = match this.install(browser, store).await {
                 Ok(done) => Install::Done(done),
                 Err(reason) => Install::Failed(reason),
             };
@@ -253,7 +263,7 @@ impl Manager {
         });
     }
 
-    pub(super) async fn install(&self, browser: Browser) -> Result<Installed, String> {
+    pub(super) async fn install(&self, browser: Browser, store: bool) -> Result<Installed, String> {
         let flavour = browser.flavour();
         let blocking = |e: tokio::task::JoinError| e.to_string();
         let exe = tokio::task::spawn_blocking(move || browser.find()).await.map_err(blocking)?;
@@ -263,10 +273,17 @@ impl Manager {
             .await
             .map_err(blocking)?
             .map_err(|e| trf!("impossible d'écrire l'extension : {e}", "cannot write the extension: {e}", e = e))?;
-        let mut done = Installed { folder, launched: false, signed: false, xpi: None };
+        let mut done = Installed { folder, launched: false, store: false, signed: false, xpi: None };
         let open = |target: &str| exe.as_deref().is_some_and(|exe| extension::launch(exe, target).is_ok());
         if flavour == Flavour::Firefox {
             done.xpi = tokio::task::spawn_blocking(extension::write_xpi).await.map_err(blocking)?.ok();
+            // The Firefox store: installed for good and kept up to date by the browser. If the
+            // browser cannot be opened on it, the package RDM ships takes over.
+            if store && open(extension::FIREFOX_STORE) {
+                done.store = true;
+                done.launched = true;
+                return Ok(done);
+            }
             let signed = extension::base().join("rdm-firefox-signed.xpi");
             if let Some(client) = self.web()
                 && update::signed_firefox_xpi(&client, &signed).await.unwrap_or(false)

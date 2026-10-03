@@ -116,6 +116,8 @@ pub struct Settings {
     pub extension_offered: bool,
     /// Install updates without asking, once no download is running.
     pub auto_update: bool,
+    /// The version that ran last: another one at start means an update was just installed.
+    pub last_version: String,
     #[serde(deserialize_with = "lenient")]
     pub language: Language,
     #[serde(deserialize_with = "lenient")]
@@ -149,6 +151,7 @@ impl Default for Settings {
             check_updates: true,
             extension_offered: false,
             auto_update: false,
+            last_version: String::new(),
             language: Language::Auto,
             clipboard: ClipboardMode::Ask,
             existing: ExistingFile::Ask,

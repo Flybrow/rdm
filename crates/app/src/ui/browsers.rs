@@ -195,7 +195,9 @@ impl App<'_> {
                     match &install {
                         Some(Install::Done(done)) => {
                             ui.add_space(10.0);
-                            steps(ui, p, browser, exe, done, copied);
+                            if steps(ui, p, browser, exe, done, copied) {
+                                self.manager.install_extension_without_store(browser);
+                            }
                         }
                         Some(Install::Failed(reason)) => {
                             ui.add_space(8.0);
@@ -208,8 +210,10 @@ impl App<'_> {
     }
 }
 
-/// What the user does in the browser to finish, with the folder / file at hand.
-fn steps(ui: &mut Ui, p: &Palette, browser: Browser, exe: Option<&Path>, done: &Installed, copied: &mut Option<String>) {
+/// What the user does in the browser to finish, with the folder / file at hand. `true`: the user
+/// asked to install without the Firefox store.
+fn steps(ui: &mut Ui, p: &Palette, browser: Browser, exe: Option<&Path>, done: &Installed, copied: &mut Option<String>) -> bool {
+    let mut without_store = false;
     let name = browser.name();
     // What "reopen" opens again: the page, or the package the browser was handed.
     let mut reopen = (browser.extensions_page().to_owned(), tr!("Rouvrir la page des extensions", "Reopen the extensions page"));
@@ -240,6 +244,23 @@ fn steps(ui: &mut Ui, p: &Palette, browser: Browser, exe: Option<&Path>, done: &
                     "RDM keeps this folder up to date: the extension follows new versions at the browser's next start. Do not delete it."
                 ),
             );
+        }
+        Flavour::Firefox if done.store => {
+            step(
+                ui,
+                p,
+                1,
+                &trf!(
+                    "{name} vient de s'ouvrir sur la page de RDM du store Firefox : cliquez sur « Ajouter à Firefox », puis sur « Ajouter ».",
+                    "{name} just opened RDM's page in the Firefox store: click \"Add to Firefox\", then \"Add\".",
+                    name = name
+                ),
+            );
+            step(ui, p, 2, connects_itself());
+            note(ui, p, tr!("Depuis le store Firefox : installée pour de bon, mise à jour par le navigateur.", "From the Firefox store: installed for good, updated by the browser."));
+            reopen = (extension::FIREFOX_STORE.to_owned(), tr!("Rouvrir la page du store", "Reopen the store page"));
+            ui.add_space(4.0);
+            without_store = ghost_button(ui, icon::PACKAGE, tr!("Le store ne s'ouvre pas ? Installer sans le store", "Store not opening? Install without the store")).clicked();
         }
         Flavour::Firefox if done.signed => {
             let package = extension::base().join("rdm-firefox-signed.xpi");
@@ -310,6 +331,7 @@ fn steps(ui: &mut Ui, p: &Palette, browser: Browser, exe: Option<&Path>, done: &
             let _ = extension::launch(exe, &target);
         }
     }
+    without_store
 }
 
 /// The extension reaches RDM through the connector RDM registered with the browser; only when the

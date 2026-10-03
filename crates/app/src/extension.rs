@@ -327,6 +327,9 @@ pub fn refresh_installed() {
 
 const XPI: &str = "rdm-firefox.xpi";
 
+/// The extension's page in the Firefox store (same ID as the bundled package).
+pub const FIREFOX_STORE: &str = "https://addons.mozilla.org/firefox/addon/rdm-rust-download-manager/";
+
 /// The Firefox package as one `.xpi` file (unsigned): permanent installation in Firefox Developer
 /// Edition, Nightly, ESR (with `xpinstall.signatures.required` off) and derivatives such as
 /// LibreWolf; release Firefox only installs signed packages.

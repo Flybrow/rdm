@@ -191,6 +191,8 @@ pub struct Installed {
     pub folder: PathBuf,
     /// The browser was opened on its extensions page (or on the package to confirm).
     pub launched: bool,
+    /// Firefox: opened on the extension's page in the Firefox store (addons.mozilla.org).
+    pub store: bool,
     /// Firefox: the signed package is installing for good (Firefox asks to confirm).
     pub signed: bool,
     /// Firefox: the unsigned package, for the editions that accept one.

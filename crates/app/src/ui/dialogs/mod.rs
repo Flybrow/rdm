@@ -1,5 +1,6 @@
-//! Dialogs: settings, VirusTotal report, Firefox pairing.
+//! Dialogs: settings, VirusTotal report, Firefox pairing, what's new.
 
+mod changelog;
 mod report;
 mod settings;
 
