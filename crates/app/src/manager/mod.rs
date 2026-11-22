@@ -13,6 +13,7 @@ mod recording;
 mod routes;
 mod scheduler;
 mod ticker;
+mod windows;
 
 pub use add::{AddRequest, ToConfirm, header_map};
 pub use browsers::{Install, Installed};
@@ -20,6 +21,7 @@ pub use entry::{Entry, Retry, Scan, ScanRefused, Verify};
 pub use recording::Track;
 pub use routes::RouteError;
 pub use ticker::Stats;
+pub use windows::{Choice, DownloadWindow, Inspected, Inspection, Ticket};
 use browsers::{BROWSERS_FILE, CUSTOM_BROWSERS_FILE, FirefoxPairing, UNINSTALLS_FILE};
 use entry::{Launch, load_entries, to_header_map};
 use files::{leftovers, mark_from_internet, planned, remove_recording_leftovers, target_for, unique_path};
@@ -69,8 +71,11 @@ pub struct Manager {
     secrets: Mutex<Secrets>,
     /// Links found in the clipboard, waiting for a click.
     offer: Mutex<Option<clipboard::Offer>>,
-    /// Downloads sent by the browser, waiting for the user's go-ahead (`confirm_browser`).
+    /// Pasted or copied links whose file is already there, waiting for the user's answer.
     to_confirm: Mutex<VecDeque<AddRequest>>,
+    /// Browser downloads waiting in their own window, and the windows to open (see `windows`).
+    windows: Mutex<windows::Windows>,
+    window_hook: OnceLock<Callback>,
     /// Text RDM copied itself (not offered back).
     own_copy: Mutex<Option<String>>,
     /// Short messages for the window (results of background actions).
@@ -155,6 +160,8 @@ impl Manager {
             secrets: Mutex::new(secrets),
             offer: Mutex::default(),
             to_confirm: Mutex::default(),
+            windows: Mutex::default(),
+            window_hook: OnceLock::new(),
             own_copy: Mutex::default(),
             notices: Mutex::default(),
             restart_after_exit: AtomicBool::new(false),

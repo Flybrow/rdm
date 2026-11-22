@@ -93,9 +93,12 @@ pub struct Settings {
     /// from files written before revisions: 0, so they receive every addition once.
     #[serde(default)]
     pub captured_revision: u8,
-    /// A download sent by the browser extension waits in RDM's window (brought to the front)
+    /// A download sent by the browser extension waits in its own window (in front of the others)
     /// for the user's go-ahead; off: it starts right away.
     pub confirm_browser: bool,
+    /// A download from the browser keeps its own window while it runs (progress, then "Open"),
+    /// like IDM's; off: the window closes once the download is accepted.
+    pub progress_window: bool,
     /// The extension's button over videos is a small icon, without its text.
     pub mini_button: bool,
     /// A browser opening without the extension (and the default one when RDM opens) gets it offered:
@@ -153,6 +156,7 @@ impl Default for Settings {
             captured: domain::default_captured(),
             captured_revision: domain::CAPTURED_REVISION,
             confirm_browser: true,
+            progress_window: true,
             mini_button: false,
             offer_extension: true,
             connections: domain::DEFAULT_CONNECTIONS,

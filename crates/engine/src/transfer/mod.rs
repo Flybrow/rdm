@@ -144,6 +144,7 @@ pub(crate) async fn run(client: &Client, job: &Job, progress: Arc<Progress>, can
         buf: (BUF_BUDGET / usize::from(job.connections.max(1))).clamp(MIN_BUF, MAX_BUF),
     });
     ctx.progress.total.store(info.size.unwrap_or(0), Relaxed);
+    ctx.progress.set_resumable(info.ranges);
     ctx.progress.downloaded.store(ctx.slots.downloaded(), Relaxed);
 
     let mut workers = JoinSet::new();

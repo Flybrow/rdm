@@ -1,6 +1,6 @@
 //! Presentation layer. `theme` (tokens, fonts) → `widgets` (atoms) → `chrome` (sidebar, header,
 //! dashboard), `card` (a download), `dialogs`, `toast` → `App` (one window), run here: windows come
-//! and go, the tray stays.
+//! and go, the tray stays. `download_window`: each browser download in a window of its own.
 
 mod action;
 mod app;
@@ -9,6 +9,7 @@ mod card;
 mod chrome;
 mod desktop;
 mod dialogs;
+mod download_window;
 mod edit;
 mod failure;
 mod filter;
@@ -23,7 +24,9 @@ use std::{
 
 use eframe::{
     UserEvent,
-    egui::{self, ColorImage, Context, Pos2, TextureOptions, ThemePreference, Vec2, ViewportBuilder, ViewportCommand, vec2},
+    egui::{
+        self, ColorImage, Context, Pos2, TextureOptions, ThemePreference, Vec2, ViewportBuilder, ViewportCommand, WindowLevel, vec2,
+    },
 };
 use winit::{
     application::ApplicationHandler,
@@ -44,6 +47,7 @@ use crate::{
 use action::Action;
 use app::{ADD_ID, App, SEARCH_ID};
 use desktop::{open_link, reveal_file};
+use download_window::DownloadWindows;
 use filter::{Filter, NAV, STATUS_FILTERS, category_icon, queue_name};
 
 const ICON_RGBA: &[u8] = include_bytes!("../../assets/icon64.rgba");
@@ -62,6 +66,11 @@ const TRAY_REFRESH: Duration = Duration::from_secs(1);
 const QUIT_GRACE: Duration = Duration::from_secs(2);
 const DEFAULT_SIZE: Vec2 = vec2(1180.0, 740.0);
 const MIN_SIZE: Vec2 = vec2(900.0, 560.0);
+
+/// RDM's icon, for the title bar and the taskbar of every window.
+fn window_icon() -> Arc<egui::IconData> {
+    Arc::new(egui::IconData { rgba: ICON_RGBA.to_vec(), width: ICON_SIZE, height: ICON_SIZE })
+}
 
 /// Wayland — the backend winit picks when either variable is set and non-empty. There, Mesa's vsync
 /// waits for the compositor's frame callback, which never comes while the window is minimized or on
@@ -99,6 +108,12 @@ pub fn run(manager: Arc<Manager>, minimized: bool) -> eframe::Result {
         let shell = shell.clone();
         move || shell.show()
     });
+    manager.on_window({
+        let shell = shell.clone();
+        move || shell.popup()
+    });
+    // The download windows outlive the root window they hang on (main window, or the tray's host).
+    let windows = DownloadWindows::default();
     manager.on_quit({
         let (shell, manager) = (shell.clone(), Arc::downgrade(&manager));
         move || {
@@ -127,20 +142,16 @@ pub fn run(manager: Arc<Manager>, minimized: bool) -> eframe::Result {
     let mut start_minimized = minimized && tray.is_none();
     let result = loop {
         if windowless {
-            #[cfg(target_os = "macos")]
-            dock_icon(false);
-            crate::priority::give_memory_back();
-            let mut idle = Idle { shell: &shell, manager: &manager, tray: tray.as_mut(), wake: None };
-            let ran = event_loop.run_app_on_demand(&mut idle);
-            match (ran, idle.wake) {
-                (Err(e), _) => break Err(e.into()),
-                (Ok(()), Some(Wake::Show)) => {}
-                (Ok(()), _) => break Ok(()),
+            match run_windowless(&mut event_loop, &manager, &shell, tray.as_mut(), &windows) {
+                Err(e) => break Err(e),
+                Ok(true) => {}
+                Ok(false) => break Ok(()),
             }
         }
         #[cfg(target_os = "macos")]
         dock_icon(true);
-        let result = open_window(&mut event_loop, &manager, &shell, tray.as_mut(), &mut memo, start_minimized);
+        windows.rehome();
+        let result = open_window(&mut event_loop, &manager, &shell, tray.as_mut(), &mut memo, &windows, start_minimized);
         start_minimized = false;
         let keep_running = tray.is_some() && !shell.quitting() && manager.with_settings(|s| s.close_to_tray);
         if result.is_err() || !keep_running {
@@ -154,6 +165,138 @@ pub fn run(manager: Arc<Manager>, minimized: bool) -> eframe::Result {
         tray.close();
     }
     result
+}
+
+/// RDM in the tray without its main window: the windowless event loop, or the download windows on
+/// their invisible host while there are some. `true` when the main window is asked for, `false`
+/// to quit.
+fn run_windowless(
+    event_loop: &mut EventLoop<UserEvent>,
+    manager: &Arc<Manager>,
+    shell: &Arc<Shell>,
+    mut tray: Option<&mut Tray>,
+    windows: &DownloadWindows,
+) -> eframe::Result<bool> {
+    loop {
+        // Download windows still open (the main window just closed), or about to open.
+        let wake = if !windows.is_empty() || manager.windows_to_open() {
+            Some(Wake::Popup)
+        } else {
+            #[cfg(target_os = "macos")]
+            dock_icon(false);
+            crate::priority::give_memory_back();
+            let mut idle = Idle { shell, manager, tray: tray.as_deref_mut(), wake: None };
+            event_loop.run_app_on_demand(&mut idle)?;
+            idle.wake
+        };
+        match wake {
+            Some(Wake::Show) => return Ok(true),
+            Some(Wake::Popup) => {
+                open_host(event_loop, manager, shell, tray.as_deref_mut(), windows)?;
+                match shell.take_pending() {
+                    _ if shell.quitting() => return Ok(false),
+                    Some(Wake::Show) => return Ok(true),
+                    _ => {}
+                }
+            }
+            _ => return Ok(false),
+        }
+    }
+}
+
+/// The root window of the download windows while the main window is closed: one transparent pixel
+/// in a corner, out of the taskbar, letting clicks through. Runs until no download window is left,
+/// the main window is asked for (it takes the download windows over) or RDM quits.
+fn open_host(
+    event_loop: &mut EventLoop<UserEvent>,
+    manager: &Arc<Manager>,
+    shell: &Arc<Shell>,
+    tray: Option<&mut Tray>,
+    windows: &DownloadWindows,
+) -> eframe::Result {
+    let viewport = ViewportBuilder::default()
+        .with_title("RDM")
+        .with_app_id("rdm")
+        .with_icon(window_icon())
+        .with_inner_size(vec2(1.0, 1.0))
+        .with_position(egui::pos2(0.0, 0.0))
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_taskbar(false)
+        .with_mouse_passthrough(true)
+        .with_resizable(false)
+        .with_active(false)
+        .with_window_level(WindowLevel::AlwaysOnBottom);
+    let mut options = eframe::NativeOptions { viewport, ..Default::default() };
+    options.glow_options.vsync = !self_paced();
+    windows.rehome();
+    #[cfg(target_os = "macos")]
+    activate();
+    let mut created = false;
+    let opened = &mut created;
+    let mut host = eframe::create_native(
+        "RDM",
+        options,
+        Box::new(move |cc| {
+            *opened = true;
+            let ctx = cc.egui_ctx.clone();
+            theme::install(&ctx);
+            ctx.set_theme(preference(manager.with_settings(|s| s.theme)));
+            shell.attach_host(&ctx);
+            Ok(Box::new(Host { manager: manager.clone(), shell: shell.clone(), windows: windows.clone(), tray, fonts_language: crate::i18n::active() }))
+        }),
+        event_loop,
+    );
+    event_loop.run_app_on_demand(&mut host)?;
+    drop(host);
+    if created { Ok(()) } else { Err(eframe::Error::AppCreation(tr!("la fenêtre n'a pas pu être créée", "the window could not be created").into())) }
+}
+
+/// The invisible root of the download windows (see `open_host`).
+struct Host<'a> {
+    manager: Arc<Manager>,
+    shell: Arc<Shell>,
+    windows: DownloadWindows,
+    tray: Option<&'a mut Tray>,
+    fonts_language: crate::i18n::Language,
+}
+
+impl eframe::App for Host<'_> {
+    fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        if self.fonts_language != crate::i18n::active() {
+            self.fonts_language = crate::i18n::active();
+            theme::install_fonts(&ctx);
+        }
+        self.windows.show(&ctx, &self.manager);
+        if let Some(tray) = self.tray.as_deref_mut() {
+            tray.relabel();
+            tray.set_tooltip(tray_summary(self.manager.stats()));
+            ctx.request_repaint_after(TRAY_REFRESH);
+        }
+        if self.windows.is_empty() && !self.manager.windows_to_open() {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
+    }
+
+    fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
+
+    fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
+        self.shell.detach_host();
+    }
+}
+
+/// macOS: RDM comes to the front (its download windows with it) without entering the Dock.
+#[cfg(target_os = "macos")]
+fn activate() {
+    use objc2::{class, msg_send, runtime::AnyObject};
+    // SAFETY: AppKit's documented call, on the main thread, between two turns of the event loop.
+    unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![app, activateIgnoringOtherApps: true];
+    }
 }
 
 /// The event loop while RDM sits in the tray without a window. It keeps running — blocked, not
@@ -294,9 +437,10 @@ fn open_window(
     shell: &Arc<Shell>,
     tray: Option<&mut Tray>,
     memo: &mut Memo,
+    windows: &DownloadWindows,
     minimized: bool,
 ) -> eframe::Result {
-    let icon = egui::IconData { rgba: ICON_RGBA.to_vec(), width: ICON_SIZE, height: ICON_SIZE };
+    let icon = window_icon();
     let paced = self_paced();
     let mut viewport = ViewportBuilder::default()
         .with_title("RDM")
@@ -327,7 +471,9 @@ fn open_window(
                 ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
             }
             let logo = ctx.load_texture("logo", ColorImage::from_rgba_unmultiplied([128, 128], LOGO_RGBA), TextureOptions::LINEAR);
-            Ok(Box::new(App::new(manager.clone(), shell.clone(), tray, memo, logo, paced, window)))
+            let mut app = App::new(manager.clone(), shell.clone(), tray, memo, logo, paced, window);
+            app.windows = windows.clone();
+            Ok(Box::new(app))
         }),
         event_loop,
     );

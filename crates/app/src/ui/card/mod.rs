@@ -2,7 +2,7 @@
 
 mod menu;
 mod scan;
-mod text;
+pub(super) mod text;
 
 use domain::Status;
 use eframe::egui::{
@@ -201,8 +201,9 @@ fn card(ui: &mut Ui, p: &Palette, queues: &[Queue], e: &Entry, actions: &mut Vec
         widgets::progress(ui, bar, bar_fraction, gradient, running);
     }
 
-    if response.double_clicked() && *status == Status::Completed {
-        actions.push(Action::Open(d.target.clone()));
+    // Double click: a finished file opens; otherwise its own window (progress) comes back.
+    if response.double_clicked() {
+        actions.push(if *status == Status::Completed { Action::Open(d.target.clone()) } else { Action::ShowProgress(d.id) });
     }
     response.context_menu(|ui| context_menu(ui, p, queues, e, actions));
     moving || matches!(e.verify, Verify::Running)

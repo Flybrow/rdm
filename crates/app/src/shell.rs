@@ -1,6 +1,7 @@
-//! Routes "show" / "quit" requests (tray, browser, second launch) to the window or, while RDM sits
-//! in the tray without one (closing to the tray destroys the window), to the windowless event loop
-//! of `ui::run`, which it wakes up.
+//! Routes "show" / "quit" requests (tray, browser, second launch) and download windows to the
+//! window or, while RDM sits in the tray without one (closing to the tray destroys the window), to
+//! the invisible host of the download windows, or to the windowless event loop of `ui::run`, which
+//! it wakes up.
 
 use std::{
     sync::{
@@ -19,8 +20,10 @@ use winit::event_loop::EventLoopProxy;
 use crate::window::Window;
 
 /// What the windowless event loop is woken up for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Wake {
+    /// A download window to open (the lowest priority: showing the main window serves it too).
+    Popup,
     Show,
     Quit,
 }
@@ -35,6 +38,8 @@ pub struct Shell {
 struct State {
     /// The open window, if any.
     window: Option<(Context, Window)>,
+    /// Without it, the invisible root window of the download windows, if any.
+    host: Option<Context>,
     /// A request that arrived while no window was open.
     pending: Option<Wake>,
     /// Wakes the windowless event loop up.
@@ -60,22 +65,54 @@ impl Shell {
         self.lock().window = None;
     }
 
+    /// The download windows' invisible host just opened (no main window): like `attach`.
+    pub fn attach_host(&self, ctx: &Context) {
+        let mut state = self.lock();
+        state.host = Some(ctx.clone());
+        if state.pending == Some(Wake::Quit) || self.quitting() {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
+    }
+
+    pub fn detach_host(&self) {
+        self.lock().host = None;
+    }
+
     pub fn show(&self) {
         let mut state = self.lock();
-        match state.window.clone() {
-            Some((ctx, window)) => {
+        match (state.window.clone(), state.host.clone()) {
+            (Some((ctx, window)), _) => {
                 drop(state);
                 window.show(&ctx);
             }
-            None => wake(&mut state, Wake::Show),
+            // The host closes, and the main window opens in its place (taking the download windows).
+            (None, Some(host)) => {
+                rank(&mut state, Wake::Show);
+                drop(state);
+                host.send_viewport_cmd(ViewportCommand::Close);
+            }
+            (None, None) => wake(&mut state, Wake::Show),
+        }
+    }
+
+    /// A download window is waiting to open: the root window (main or host) opens it at its next
+    /// frame; without one, the host is started.
+    pub fn popup(&self) {
+        let mut state = self.lock();
+        match state.window.as_ref().map(|(ctx, _)| ctx.clone()).or_else(|| state.host.clone()) {
+            Some(ctx) => {
+                drop(state);
+                ctx.request_repaint();
+            }
+            None => wake(&mut state, Wake::Popup),
         }
     }
 
     pub fn quit(&self) {
         self.quitting.store(true, SeqCst);
         let mut state = self.lock();
-        match state.window.clone() {
-            Some((ctx, _)) => {
+        match state.window.as_ref().map(|(ctx, _)| ctx.clone()).or_else(|| state.host.clone()) {
+            Some(ctx) => {
                 drop(state);
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
@@ -88,7 +125,10 @@ impl Shell {
     }
 
     pub fn repaint(&self) {
-        let ctx = self.lock().window.as_ref().map(|(ctx, _)| ctx.clone());
+        let ctx = {
+            let state = self.lock();
+            state.window.as_ref().map(|(ctx, _)| ctx.clone()).or_else(|| state.host.clone())
+        };
         if let Some(ctx) = ctx {
             ctx.request_repaint();
         }
@@ -104,11 +144,16 @@ impl Shell {
     }
 }
 
-fn wake(state: &mut State, wake: Wake) {
-    // "Quit" wins over a "show" not yet served.
-    if state.pending != Some(Wake::Quit) {
+/// Keeps the more important of the pending request and `wake`: "quit" wins over a "show" not yet
+/// served, which wins over a download window (the main window opens those too).
+fn rank(state: &mut State, wake: Wake) {
+    if state.pending.is_none_or(|pending| pending < wake) {
         state.pending = Some(wake);
     }
+}
+
+fn wake(state: &mut State, wake: Wake) {
+    rank(state, wake);
     if let Some(waker) = &state.waker {
         // Any event wakes the loop; with no window it is only a nudge.
         let nudge = UserEvent::RequestRepaint { viewport_id: ViewportId::ROOT, when: Instant::now(), cumulative_pass_nr: 0 };
@@ -131,6 +176,31 @@ mod tests {
         shell.show();
         assert_eq!(shell.take_pending(), Some(Wake::Quit), "quit is never overridden");
         assert!(shell.quitting());
+    }
+
+    #[test]
+    fn download_windows_rank_below_show_and_quit() {
+        let shell = Shell::default();
+        shell.popup();
+        assert_eq!(shell.take_pending(), Some(Wake::Popup));
+        shell.show();
+        shell.popup();
+        assert_eq!(shell.take_pending(), Some(Wake::Show), "the main window opens the download windows too");
+        shell.popup();
+        shell.quit();
+        shell.popup();
+        assert_eq!(shell.take_pending(), Some(Wake::Quit));
+    }
+
+    #[test]
+    fn showing_from_the_host_closes_it_for_the_main_window() {
+        let shell = Shell::default();
+        shell.attach_host(&Context::default());
+        shell.popup();
+        assert_eq!(shell.take_pending(), None, "the host opens download windows itself");
+        shell.show();
+        assert_eq!(shell.take_pending(), Some(Wake::Show), "the main window opens once the host has closed");
+        shell.detach_host();
     }
 
     #[test]

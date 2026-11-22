@@ -78,6 +78,30 @@ impl Window {
     }
 }
 
+/// Every window of the interface thread gets RDM's title bar (see `Window::paint_title_bar`): the
+/// download windows are created by egui, which gives no handle to them.
+pub fn paint_title_bars(dark: bool, background: Color32, text: Color32, border: Color32) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::{
+            Foundation::{HWND, LPARAM},
+            System::Threading::GetCurrentThreadId,
+            UI::WindowsAndMessaging::EnumThreadWindows,
+        };
+        unsafe extern "system" fn paint(hwnd: HWND, colours: LPARAM) -> i32 {
+            // SAFETY: `colours` points to the tuple below, alive for the whole enumeration.
+            let (dark, background, text, border) = unsafe { *(colours as *const (bool, Color32, Color32, Color32)) };
+            Window { hwnd: hwnd as isize }.paint_title_bar(dark, background, text, border);
+            1 // go on
+        }
+        let colours = (dark, background, text, border);
+        // SAFETY: the callback only paints this thread's own top-level windows, synchronously.
+        unsafe { EnumThreadWindows(GetCurrentThreadId(), Some(paint), (&raw const colours) as LPARAM) };
+    }
+    #[cfg(not(windows))]
+    let _ = (dark, background, text, border);
+}
+
 /// Whether a window whose top-left corner is at `x, y` (physical pixels) would be on a screen: the
 /// monitor it was on may have been unplugged since (a laptop taken off its dock), and Windows does not
 /// move a window created off-screen. Elsewhere the window manager constrains new windows itself.

@@ -3,7 +3,7 @@
 use super::*;
 
 /// How a status reads and which colour carries it.
-pub(super) fn status_style(p: &Palette, e: &Entry) -> (&'static str, Color32) {
+pub(in crate::ui) fn status_style(p: &Palette, e: &Entry) -> (&'static str, Color32) {
     match e.download.status() {
         Status::Running if e.download.is_recording() => (tr!("ENREGISTREMENT", "RECORDING"), p.danger),
         Status::Running => (tr!("EN COURS", "ACTIVE"), p.accent),
@@ -41,7 +41,7 @@ pub(super) fn markers(p: &Palette, queues: &[Queue], e: &Entry) -> Vec<(&'static
     marks
 }
 
-pub(super) fn detail_line(e: &Entry, status: &Status, recording: bool, done: u64, total: u64, conns: usize, p: &Palette) -> (String, Color32) {
+pub(in crate::ui) fn detail_line(e: &Entry, status: &Status, recording: bool, done: u64, total: u64, conns: usize, p: &Palette) -> (String, Color32) {
     let size = if total > 0 { bytes(total) } else { tr!("taille inconnue", "unknown size").into() };
     let eta = e.eta().map(|s| trf!(" · reste {}", " · {} left", duration(s))).unwrap_or_default();
     let (got, rate) = (bytes(done), speed(e.speed));

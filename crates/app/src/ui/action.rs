@@ -28,6 +28,8 @@ pub(super) enum Action {
     Hash(DownloadId),
     Scan(DownloadId),
     ShowReport(DownloadId),
+    /// The download's own window (progress), opened or brought back.
+    ShowProgress(DownloadId),
     PauseAll,
     ResumeAll,
     ClearCompleted,
@@ -72,6 +74,7 @@ impl App<'_> {
                     Err(ScanRefused::NotEligible) => {}
                 },
                 Action::ShowReport(id) => self.report = Some(id),
+                Action::ShowProgress(id) => self.manager.show_progress(id),
                 Action::PauseAll => self.manager.pause_all(),
                 Action::ResumeAll => self.manager.resume_all(),
                 Action::ClearCompleted => {

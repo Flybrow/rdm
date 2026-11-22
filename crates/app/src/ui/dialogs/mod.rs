@@ -181,29 +181,24 @@ impl App<'_> {
         }
     }
 
-    /// A download sent by the browser waits for the user's go-ahead (`confirm_browser`).
+    /// A pasted or copied link whose file is already in the folder: keep both, or replace
+    /// (`ExistingFile::Ask`). Browser downloads ask in their own window (`download_window`).
     pub(super) fn confirm_prompt(&mut self, ctx: &Context) {
-        let Some(crate::manager::ToConfirm { url, name, ask_existing: exists, confirming, waiting }) = self.manager.to_confirm() else { return };
+        let Some(crate::manager::ToConfirm { url, name, ask_existing: exists, waiting }) = self.manager.to_confirm() else { return };
         let p = Palette::from_ctx(ctx);
         let name = name.unwrap_or_else(|| engine::suggest_file_name(&url, None));
         // None: cancel; Some(existing): download, with that answer if the file is already there.
         let mut answer: Option<Option<ExistingFile>> = None;
         let mut cancel = false;
-        Modal::new(Id::new("confirm-browser")).frame(dialog_frame(&p)).backdrop_color(backdrop(&p)).show(ctx, |ui| {
+        Modal::new(Id::new("confirm-existing")).frame(dialog_frame(&p)).backdrop_color(backdrop(&p)).show(ctx, |ui| {
             ui.set_width(500.0);
             let subtitle = if waiting > 1 {
                 let more = crate::i18n::count(waiting as u64 - 1, ("autre en attente", "autres en attente"), ("more waiting", "more waiting"));
-                trf!("Envoyé par le navigateur · {more}", "Sent by the browser · {more}", more = more)
+                trf!("Que voulez-vous faire ? · {more}", "What do you want to do? · {more}", more = more)
             } else {
-                tr!("Envoyé par le navigateur", "Sent by the browser").to_owned()
+                tr!("Que voulez-vous faire ?", "What do you want to do?").to_owned()
             };
-            // Only there for the file already in the folder (no confirmation of every download).
-            let (title, subtitle) = if confirming {
-                (tr!("Nouveau téléchargement", "New download"), subtitle)
-            } else {
-                (tr!("Le fichier existe déjà", "The file already exists"), tr!("Que voulez-vous faire ?", "What do you want to do?").to_owned())
-            };
-            if dialog_header(ui, &p, icon::DOWNLOAD_SIMPLE, p.accent, title, &subtitle) {
+            if dialog_header(ui, &p, icon::DOWNLOAD_SIMPLE, p.accent, tr!("Le fichier existe déjà", "The file already exists"), &subtitle) {
                 cancel = true;
             }
             ui.add_space(14.0);
@@ -223,22 +218,6 @@ impl App<'_> {
                     .color(p.warning),
                 );
             }
-            if confirming {
-                ui.add_space(12.0);
-                toggle(
-                    ui,
-                    &mut self.confirm_always,
-                    tr!("Ne plus demander", "Don't ask again"),
-                    tr!(
-                        "Les nouveaux téléchargements se lanceront sans message de confirmation. Réactivable depuis les paramètres.",
-                        "New downloads will start without a confirmation message. Can be turned back on in the settings."
-                    ),
-                );
-                if self.confirm_always {
-                    ui.add_space(6.0);
-                    unconfirmed_warning(ui, &p);
-                }
-            }
             ui.add_space(16.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if exists {
@@ -257,12 +236,9 @@ impl App<'_> {
             });
         });
         if cancel {
-            self.manager.answer_confirm(false, None, false);
-            self.confirm_always = false;
+            self.manager.answer_confirm(false, None);
         } else if let Some(existing) = answer {
-            // "Don't ask again" only counts with a download: cancelling one link says nothing about the next.
-            self.manager.answer_confirm(true, existing, self.confirm_always);
-            self.confirm_always = false;
+            self.manager.answer_confirm(true, existing);
         }
     }
 

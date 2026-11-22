@@ -8,7 +8,7 @@ use eframe::egui::{self, CentralPanel, Context, Frame, Key, LayerId, Margin, Tex
 use egui_phosphor::regular as icon;
 use url::Url;
 
-use super::{Memo, browsers, desktop::open_link, dialogs, edit, theme, toast::Toasts, tray_summary, widgets};
+use super::{DownloadWindows, Memo, browsers, desktop::open_link, dialogs, edit, theme, toast::Toasts, tray_summary, widgets};
 use crate::{
     manager::{AddRequest, Manager},
     settings::Settings,
@@ -61,8 +61,8 @@ pub(super) struct App<'a> {
     pub(super) edit: Option<edit::Editor>,
     /// "Delete the file" asked: waiting for the user's confirmation.
     pub(super) confirm_delete: Option<DownloadId>,
-    /// "Don't ask again" ticked in the browser download's confirmation.
-    pub(super) confirm_always: bool,
+    /// Browser downloads in windows of their own (children of this window while it is open).
+    pub(super) windows: DownloadWindows,
     pub(super) toasts: Toasts,
     /// Something on screen moves this frame (progress, spinner): keep redrawing.
     pub(super) animating: bool,
@@ -103,7 +103,7 @@ impl<'a> App<'a> {
             browsers: None,
             edit: None,
             confirm_delete: None,
-            confirm_always: false,
+            windows: DownloadWindows::default(),
             toasts: Toasts::default(),
             animating: false,
             settle_frames: 0,
@@ -256,6 +256,7 @@ impl eframe::App for App<'_> {
         self.firefox_prompt(ctx);
         self.confirm_prompt(ctx);
         self.apply(ctx, actions);
+        self.windows.show(ctx, &self.manager);
         if overlays != (self.settings.is_some(), self.report.is_some(), self.browsers.is_some(), self.edit.is_some(), self.confirm_delete.is_some()) {
             self.settle_frames = 2;
         }

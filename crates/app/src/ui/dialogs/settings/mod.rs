@@ -37,8 +37,8 @@ fn reset_tab(tab: SettingsTab, s: &mut Settings) {
                 (d.download_dir, d.categorize, d.category_dirs, d.existing, d.speed_limit_kib);
         }
         SettingsTab::Browser => {
-            (s.captured, s.confirm_browser, s.mini_button, s.offer_extension, s.clipboard) =
-                (d.captured, d.confirm_browser, d.mini_button, d.offer_extension, d.clipboard);
+            (s.captured, s.confirm_browser, s.progress_window, s.mini_button, s.offer_extension, s.clipboard) =
+                (d.captured, d.confirm_browser, d.progress_window, d.mini_button, d.offer_extension, d.clipboard);
         }
         SettingsTab::Security => {}
         SettingsTab::Advanced => {

@@ -16,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -123,6 +123,8 @@ pub struct Progress {
     /// The file's pieces while a segmented transfer runs, a few times a second, in file order with
     /// finished neighbours joined (about one per connection); empty otherwise. For the progress bar.
     pieces: Mutex<Vec<domain::Segment>>,
+    /// Whether the server serves parts of the file (a pause resumes): 0 not known yet, 1 yes, 2 no.
+    resumable: AtomicU8,
 }
 
 impl Progress {
@@ -134,6 +136,19 @@ impl Progress {
         if let Ok(mut p) = self.pieces.lock() {
             *p = pieces;
         }
+    }
+
+    /// Whether a pause would resume where it stopped (`None` until the server answered).
+    pub fn resumable(&self) -> Option<bool> {
+        match self.resumable.load(Ordering::Relaxed) {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn set_resumable(&self, ranges: bool) {
+        self.resumable.store(if ranges { 1 } else { 2 }, Ordering::Relaxed);
     }
 
     pub fn snapshot(&self) -> (u64, u64, usize) {

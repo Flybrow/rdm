@@ -22,12 +22,24 @@ pub(super) fn browser_tab(ui: &mut Ui, p: &Palette, s: &mut Settings) -> Option<
             ui,
             &mut s.confirm_browser,
             tr!("Confirmer les téléchargements du navigateur", "Confirm downloads from the browser"),
-            tr!("RDM passe au premier plan et attend votre accord", "RDM comes to the front and waits for your go-ahead"),
+            tr!(
+                "Une fenêtre s'ouvre au premier plan : dossier, nom et options de ce téléchargement, puis votre accord",
+                "A window opens in front: folder, name and options of this download, then your go-ahead"
+            ),
         );
         if !s.confirm_browser {
             ui.add_space(4.0);
             unconfirmed_warning(ui, p);
         }
+        toggle(
+            ui,
+            &mut s.progress_window,
+            tr!("Afficher la fenêtre de progression", "Show the progress window"),
+            tr!(
+                "Le téléchargement reste dans sa fenêtre : progression, puis Ouvrir ou Ouvrir l'emplacement",
+                "The download stays in its window: progress, then Open or Open the location"
+            ),
+        );
         toggle(
             ui,
             &mut s.mini_button,
